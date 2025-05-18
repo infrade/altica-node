@@ -23,16 +23,22 @@ import (
 	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/sirupsen/logrus"
+)
+
+type LogLevel string
+
+const (
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelWarn  LogLevel = "warn"
+	LogLevelError LogLevel = "error"
 )
 
 type NodeOptions struct {
 	PrivateKey crypto.PrivKey
 	DataDir    string
-}
-
-// Bootstrap nodes
-var bootstrapPeers = []string{
-	"/dns4/4.tcp.eu.ngrok.io/tcp/15942/p2p/12D3KooWH6hNr8GtqXpmpB7oPshmKnA58G7UuYR5YXdnJxEAoT5s",
+	LogLevel   LogLevel
 }
 
 type Node struct {
@@ -40,9 +46,31 @@ type Node struct {
 	DHT     *dht.IpfsDHT
 	PubSub  *pubsub.PubSub
 	Context context.Context
+	log     *logrus.Logger
+}
+
+// Bootstrap nodes
+var bootstrapPeers = []string{
+	"/dns4/4.tcp.eu.ngrok.io/tcp/15942/p2p/12D3KooWH6hNr8GtqXpmpB7oPshmKnA58G7UuYR5YXdnJxEAoT5s",
 }
 
 func NewNode(ctx context.Context, opts NodeOptions) (*Node, error) {
+	logger := logrus.New()
+
+	// Set log level
+	switch opts.LogLevel {
+	case LogLevelDebug:
+		logger.SetLevel(logrus.DebugLevel)
+	case LogLevelInfo:
+		logger.SetLevel(logrus.InfoLevel)
+	case LogLevelWarn:
+		logger.SetLevel(logrus.WarnLevel)
+	case LogLevelError:
+		logger.SetLevel(logrus.ErrorLevel)
+	default:
+		logger.SetLevel(logrus.InfoLevel)
+	}
+
 	peerstorePath := filepath.Join(opts.DataDir, "peerstore")
 	ds, err := leveldb.NewDatastore(peerstorePath, nil)
 	if err != nil {
@@ -97,6 +125,7 @@ func NewNode(ctx context.Context, opts NodeOptions) (*Node, error) {
 		DHT:     dhtInstance,
 		PubSub:  pubs,
 		Context: ctx,
+		log:     logger,
 	}
 
 	return node, nil
@@ -108,6 +137,7 @@ func (n *Node) Bootstrap() error {
 	for _, addr := range bootstrapPeers {
 		ma, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
+			n.log.WithError(err).Error("Invalid bootstrap address")
 			return fmt.Errorf("invalid bootstrap address: %w", err)
 		}
 		bootstrapMultiaddrs = append(bootstrapMultiaddrs, ma)
@@ -115,6 +145,7 @@ func (n *Node) Bootstrap() error {
 
 	// Bootstrap DHT
 	if err := n.DHT.Bootstrap(n.Context); err != nil {
+		n.log.WithError(err).Error("Failed to bootstrap DHT")
 		return fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
@@ -123,39 +154,48 @@ func (n *Node) Bootstrap() error {
 	for _, peerAddr := range bootstrapMultiaddrs {
 		peerInfo, err := peer.AddrInfoFromP2pAddr(peerAddr)
 		if err != nil {
+			n.log.WithError(err).Debug("Failed to parse peer address")
 			continue
 		}
 		wg.Add(1)
 		go func(pi peer.AddrInfo) {
 			defer wg.Done()
 			if err := n.Host.Connect(n.Context, pi); err != nil {
-				fmt.Printf("Failed to connect to bootstrap peer %s: %s\n", pi.ID, err)
+				n.log.WithFields(logrus.Fields{
+					"peer":  pi.ID.String(),
+					"error": err,
+				}).Debug("Failed to connect to bootstrap peer")
 			}
 		}(*peerInfo)
 	}
 	wg.Wait()
+
 	routingDiscovery := routingdiscovery.NewRoutingDiscovery(n.DHT)
 	routingDiscovery.Advertise(n.Context, "altica-dns-discovery")
-	fmt.Println("Advertising for peers...")
+
+	n.log.Debug("Advertising for peers...")
 
 	go func() {
 		for {
 			peerChan, err := routingDiscovery.FindPeers(n.Context, "altica-dns-discovery")
 			if err != nil {
-				fmt.Println("Failed to find peers:", err)
+				n.log.WithError(err).Debug("Failed to find peers")
 				time.Sleep(time.Minute)
 				continue
 			}
 
 			for peer := range peerChan {
 				if peer.ID == n.Host.ID() {
-					fmt.Println("Skipping self peer")
+					n.log.Debug("Skipping self peer")
 					continue // Don't connect to self
 				}
 				if err := n.Host.Connect(n.Context, peer); err != nil {
-					fmt.Println("Failed to connect to peer:", err)
+					n.log.WithFields(logrus.Fields{
+						"peer":  peer.ID.String(),
+						"error": err,
+					}).Debug("Failed to connect to peer")
 				} else {
-					fmt.Println("Connected to peer:", peer.ID.String())
+					n.log.WithField("peer", peer.ID.String()).Info("Connected to peer")
 				}
 			}
 			time.Sleep(time.Minute)
@@ -224,12 +264,13 @@ func (n *Node) ListPeers() []peer.AddrInfo {
 // PrettyPrintPeers prints connected peers in a human-readable format
 func (n *Node) PrettyPrintPeers() {
 	peers := n.ListPeers()
-	fmt.Printf("Total peers connected: %d\n", len(peers))
+	n.log.WithField("count", len(peers)).Info("Connected peers")
+
 	for i, p := range peers {
-		fmt.Printf("%d. Peer ID: %s\n", i+1, p.ID.String())
-		fmt.Printf("   Addresses:\n")
-		for _, addr := range p.Addrs {
-			fmt.Printf("    - %s\n", addr.String())
-		}
+		n.log.WithFields(logrus.Fields{
+			"index":     i + 1,
+			"id":        p.ID.String(),
+			"addresses": p.Addrs,
+		}).Debug("Peer details")
 	}
 }

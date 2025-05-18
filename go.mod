@@ -11,6 +11,7 @@ require (
 	github.com/libp2p/go-libp2p-peerstore v0.8.0
 	github.com/libp2p/go-libp2p-pubsub v0.13.1
 	github.com/multiformats/go-multiaddr v0.15.0
+	github.com/sirupsen/logrus v1.8.1
 	github.com/stretchr/testify v1.10.0
 )
 
