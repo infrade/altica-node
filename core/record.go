@@ -14,6 +14,9 @@ type Record struct {
 	TTL       time.Duration `json:"ttl"`
 	Signature []byte        `json:"signature,omitempty"`
 	PublicKey []byte        `json:"public_key,omitempty"`
+	Version   int64         `json:"version"`
+	Status    string        `json:"status"`            // "pending", "confirmed", "rejected"
+	LockID    string        `json:"lock_id,omitempty"` // For distributed locking
 }
 
 // NewRecord creates a new unsigned record
@@ -21,7 +24,7 @@ func NewRecord(domain, value string, ttl time.Duration) *Record {
 	return &Record{
 		Domain:    domain,
 		Value:     value,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UTC(),
 		TTL:       ttl,
 	}
 }

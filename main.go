@@ -3,25 +3,28 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"altica_node/core"
+	"altica_node/rpc"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 )
 
 func main() {
+	// Parse command line flags
+	port := flag.Int("port", 6361, "RPC server port")
+	flag.Parse()
+
 	ctx := context.Background()
 
 	// Setup data directory
-	// homeDir, err := os.UserHomeDir()
-	// if err != nil {
-	// 	fmt.Println("Error getting home directory:", err)
-	// 	os.Exit(1)
-	// }
 	dataDir := filepath.Join(".", ".altica")
 
 	// Create data directory if it doesn't exist
@@ -82,7 +85,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Start RPC server
+	rpcServer := rpc.NewRPCServer(node)
+	go func() {
+		addr := fmt.Sprintf(":%d", *port)
+		if err := rpcServer.Start(addr); err != nil {
+			fmt.Printf("Failed to start RPC server: %s\n", err)
+			os.Exit(1)
+		}
+	}()
+
 	fmt.Println("Altica P2P node is running with ID:", node.Host.ID())
+	fmt.Printf("RPC server listening on :%d\n", *port)
 
 	// After node setup and bootstrap
 	go func() {
@@ -93,5 +107,8 @@ func main() {
 		}
 	}()
 
-	select {} // keep alive
+	// Wait for interrupt
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
 }
