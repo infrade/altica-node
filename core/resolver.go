@@ -13,5 +13,5 @@ func (r *Resolver) Resolve(domain string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return record.Value, true
+	return record.Mappings["A"].(string), true
 }

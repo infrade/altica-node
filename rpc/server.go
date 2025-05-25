@@ -84,9 +84,10 @@ func (s *RPCServer) methods() map[string]func(json.RawMessage) (interface{}, err
 		"node.status": s.handleNodeStatus,
 
 		// Record management
-		"records.get":    s.handleRecordGet,
-		"records.set":    s.handleRecordSet,
-		"records.status": s.handleRecordStatus,
+		"domain.register": s.handleDomainRegister,
+		"domain.get":      s.handleDomainGet,
+		"domain.status":   s.handleDomainStatus,
+		"record.add":      s.handleRecordAdd,
 
 		// DHT operations
 		"dht.findPeer":      s.handleDHTFindPeer,

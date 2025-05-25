@@ -299,7 +299,7 @@ func (s *RecordStore) ListModifiedSince(timestamp time.Time) ([]*Record, error) 
 			s.log.WithError(err).Error("Failed to deserialize record")
 			continue
 		}
-		if record.Timestamp.After(timestamp) {
+		if record.Metadata["updated_at"].(time.Time).After(timestamp) {
 			records = append(records, record)
 		}
 	}
