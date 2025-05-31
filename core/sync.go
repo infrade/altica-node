@@ -40,6 +40,9 @@ type RecordMessage struct {
 	Consensus  map[string]bool `json:"consensus,omitempty"` // Map of peer IDs to their vote (true=confirm, false=reject)
 }
 
+// Add a global for vote tracking (in-memory for now)
+var voteTracker = make(map[string]map[string]bool) // domain -> peerID -> vote (true=accept, false=reject)
+
 func (s *RecordStore) computeStateRoot() []byte {
 	hash := sha256.New()
 	records := s.List()
@@ -70,8 +73,8 @@ func (n *Node) StartRecordSync() error {
 	// Handle incoming record updates
 	go n.handleRecordUpdates(sub)
 
-	// Periodically sync our records to other peers
-	go n.periodicRecordSync(topic)
+	// // Periodically sync our records to other peers
+	// go n.periodicRecordSync(topic)
 
 	return nil
 }
@@ -94,6 +97,12 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 		}
 		fmt.Println("successfully unmarshalled", recordMsg.Version, n.Store.GetCurrentVersion())
 
+		// skip if node is publisher
+		if recordMsg.PeerID == n.getID() {
+			fmt.Println("publisher skipping self-published record")
+			continue
+		}
+
 		// Check if we need this update based on version and state root
 		if recordMsg.Version <= n.Store.GetCurrentVersion() {
 			n.log.WithField("version", recordMsg.Version).Debug("Ignoring outdated record update")
@@ -107,7 +116,39 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 			if recordMsg.Version > n.Store.GetCurrentVersion()+1000 {
 				n.syncFromSnapshot(recordMsg)
 			}
-
+		case "registration_intent":
+			// Each peer votes on the record
+			n.handleRegistrationIntent(recordMsg)
+		case "vote":
+			// Tally votes
+			for _, record := range recordMsg.Records {
+				domain := record.Domain
+				if voteTracker[domain] == nil {
+					voteTracker[domain] = make(map[string]bool)
+				}
+				voteTracker[domain][recordMsg.PeerID] = recordMsg.Consensus[recordMsg.PeerID]
+				// Check if 51%+ accept or reject
+				totalPeers := len(n.ListPeers())
+				accepts, rejects := 0, 0
+				for _, v := range voteTracker[domain] {
+					if v {
+						accepts++
+					} else {
+						rejects++
+					}
+				}
+				threshold := totalPeers/2 + 1
+				if accepts >= threshold {
+					n.log.Infof("Consensus reached: ACCEPT for %s", domain)
+					// Confirm record
+					n.Store.ConfirmRecord(domain, record.LockID)
+					delete(voteTracker, domain)
+				} else if rejects >= threshold {
+					n.log.Infof("Consensus reached: REJECT for %s", domain)
+					n.Store.RejectRecord(domain, record.LockID)
+					delete(voteTracker, domain)
+				}
+			}
 		case "batch":
 			fmt.Println("Processing batch update")
 			// Check bloom filter first
@@ -252,6 +293,7 @@ func (n *Node) PublishRecord(record *Record) error {
 		Records:   []Record{*record},
 		Version:   record.Version,
 		StateRoot: n.Store.computeStateRoot(),
+		PeerID:    n.getID(),
 	}
 
 	data, err := json.Marshal(msg)
@@ -323,76 +365,27 @@ func (n *Node) publishBatch(topic *pubsub.Topic, msg RecordMessage) error {
 	return topic.Publish(n.Context, data)
 }
 
-// func (n *Node) handleRegistrationIntent(msg RecordMessage) {
-// 	for _, record := range msg.Records {
-// 		// Verify the record
-// 		if !record.Verify() {
-// 			n.log.Error("Invalid record signature")
-// 			continue
-// 		}
+func (n *Node) handleRegistrationIntent(msg RecordMessage) {
+	for _, record := range msg.Records {
+		// Each peer validates the record
+		accept := false
+		if !record.Verify() {
+			n.log.Error("Invalid record signature")
+			accept = false
+		} else if available, _ := n.Store.IsDomainAvailable(record.Domain); !available {
+			accept = false
+		} else {
+			accept = true
+		}
 
-// 		// Check if we already have this record
-// 		if !n.Store.IsDomainAvailable(record.Domain) {
-// 			n.publishRegistrationReject(record)
-// 			continue
-// 		}
+		// Get number of online nodes
+		onlineNodes := len(n.DHT.RoutingTable().ListPeers())
 
-// 		// Try to acquire the lock
-// 		lockID, acquired := n.Store.TryAcquireLock(record.Domain)
-// 		if !acquired {
-// 			n.publishRegistrationReject(record)
-// 			continue
-// 		}
-
-// 		// Add to pending records
-// 		record.LockID = lockID
-// 		if err := n.Store.Add(&record); err != nil {
-// 			n.Store.ReleaseLock(record.Domain, lockID)
-// 			n.publishRegistrationReject(record)
-// 			continue
-// 		}
-
-// 		// Initialize consensus tracking
-// 		msg.Consensus = make(map[string]bool)
-// 		msg.Consensus[n.Host.ID().String()] = true
-
-// 		// Publish confirmation
-// 		n.publishRegistrationConfirm(record)
-// 	}
-// }
-
-// func (n *Node) publishRegistrationConfirm(record Record) error {
-// 	topic := n.RecordsTopic
-
-// 	msg := RecordMessage{
-// 		Type:      "registration_confirm",
-// 		Records:   []Record{record},
-// 		Version:   record.Version,
-// 		StateRoot: n.Store.computeStateRoot(),
-// 	}
-
-// 	data, err := json.Marshal(msg)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	return topic.Publish(n.Context, data)
-// }
-
-// func (n *Node) publishRegistrationReject(record Record) error {
-// 	topic := n.RecordsTopic
-
-// 	msg := RecordMessage{
-// 		Type:      "registration_reject",
-// 		Records:   []Record{record},
-// 		Version:   record.Version,
-// 		StateRoot: n.Store.computeStateRoot(),
-// 	}
-
-// 	data, err := json.Marshal(msg)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	return topic.Publish(n.Context, data)
-// }
+		// Submit vote using voting manager
+		if n.Store.votingManager != nil {
+			if err := n.Store.votingManager.SubmitVote(record.Domain, accept, onlineNodes); err != nil {
+				n.log.WithError(err).Error("Failed to submit vote")
+			}
+		}
+	}
+}

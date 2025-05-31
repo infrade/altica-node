@@ -46,9 +46,9 @@ type NodeOptions struct {
 
 type Node struct {
 	Host         host.Host
-	DHT          *dht.IpfsDHT // custom altica DHT only
+	DHT          *dht.IpfsDHT
 	PubSub       *pubsub.PubSub
-	RecordsTopic *pubsub.Topic // joined once and reused
+	RecordsTopic *pubsub.Topic
 	Context      context.Context
 	log          *logrus.Logger
 	Store        *RecordStore
@@ -158,7 +158,7 @@ func NewNode(ctx context.Context, opts NodeOptions) (*Node, error) {
 		return nil, fmt.Errorf("failed to join records topic: %w", err)
 	}
 
-	store := NewRecordStore(recordsDs, alticaDHT, ctx, h.ID().String())
+	store := NewRecordStore(recordsDs, alticaDHT, ctx, h.ID().String(), opts.PrivateKey)
 	node := &Node{
 		Host:         h,
 		DHT:          alticaDHT,
@@ -344,4 +344,9 @@ func (n *Node) promptUserConfirmation(prompt string) bool {
 	var response string
 	fmt.Scanln(&response)
 	return response == "" || response == "Y" || response == "y"
+}
+
+// getID returns the node's peer ID as a string
+func (n *Node) getID() string {
+	return n.Host.ID().String()
 }

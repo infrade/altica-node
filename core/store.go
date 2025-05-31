@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,13 +11,15 @@ import (
 	"strings"
 
 	"github.com/bits-and-blooms/bloom/v3"
+	"github.com/drand/kyber"
+	"github.com/drand/kyber/pairing/bn256"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/query"
 	leveldb "github.com/ipfs/go-ds-leveldb"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 )
 
 type PendingRecord struct {
@@ -26,20 +29,60 @@ type PendingRecord struct {
 }
 
 type RecordStore struct {
-	db           *leveldb.Datastore
-	dht          *dht.IpfsDHT
-	ctx          context.Context
-	hostID       string
-	log          *logrus.Logger
-	pendingLocks map[string]string // domain -> lockID
-	lockMutex    sync.RWMutex
-	recordsMutex sync.RWMutex       // For operations on confirmed records
-	version      int64              // Current version number
-	filter       *bloom.BloomFilter // Bloom filter for fast lookups
+	db            *leveldb.Datastore
+	dht           *dht.IpfsDHT
+	ctx           context.Context
+	hostID        string
+	log           *logrus.Logger
+	pendingLocks  map[string]string // domain -> lockID
+	lockMutex     sync.RWMutex
+	recordsMutex  sync.RWMutex       // For operations on confirmed records
+	version       int64              // Current version number
+	filter        *bloom.BloomFilter // Bloom filter for fast lookups
+	votingManager *VotingManager     // Added for voting functionality
+	privKey       kyber.Scalar       // Node's private key for voting
 }
 
-func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context, hostID string) *RecordStore {
-	return &RecordStore{
+// convertCryptoPrivKeyToKyber converts a crypto private key to a Kyber scalar
+func convertCryptoPrivKeyToKyber(privKey crypto.PrivKey) (kyber.Scalar, error) {
+	if privKey == nil {
+		return nil, fmt.Errorf("private key is nil")
+	}
+
+	// Get the raw private key bytes
+	rawKey, err := privKey.Raw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get raw private key: %w", err)
+	}
+
+	// Create a new Kyber suite with proper initialization
+	suite := bn256.NewSuiteG2()
+
+	// Create a new scalar
+	scalar := suite.Scalar()
+
+	// Convert the raw key bytes to a scalar
+	// We need to ensure the bytes are the right length for the scalar
+	keyBytes := make([]byte, scalar.MarshalSize())
+	copy(keyBytes, rawKey)
+
+	// Unmarshal the bytes into the scalar
+	if err := scalar.UnmarshalBinary(keyBytes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal private key: %w", err)
+	}
+
+	return scalar, nil
+}
+
+func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context, hostID string, privKey crypto.PrivKey) *RecordStore {
+	// Convert libp2p private key to Kyber scalar
+	kyberPrivKey, err := convertCryptoPrivKeyToKyber(privKey)
+	if err != nil {
+		// Log error but continue with nil voting manager
+		logrus.WithError(err).Error("Failed to convert private key for voting")
+	}
+
+	store := &RecordStore{
 		db:           db,
 		dht:          dht,
 		ctx:          ctx,
@@ -48,6 +91,18 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 		pendingLocks: make(map[string]string),
 		version:      0,
 	}
+
+	// Initialize voting manager with converted private key
+	if kyberPrivKey != nil {
+		votingManager, err := NewVotingManager(store, kyberPrivKey)
+		if err != nil {
+			store.log.WithError(err).Error("Failed to initialize voting manager")
+		} else {
+			store.votingManager = votingManager
+		}
+	}
+
+	return store
 }
 
 func (s *RecordStore) Get(domain string) (*Record, bool) {
@@ -176,13 +231,16 @@ func (s *RecordStore) Add(record *Record) error {
 	// Add to DHT as pending record
 	record.Status = "pending"
 	record.LockID = lockID
-	pending := PendingRecord{
-		Record:        record,
-		Confirmations: 0,
-		Rejections:    0,
-	}
-	if err := s.SavePendingRecordToDHT(record.Domain, pending); err != nil {
-		return fmt.Errorf("failed to save pending record to DHT: %w", err)
+
+	// Get number of online nodes
+	onlineNodes := len(s.dht.RoutingTable().ListPeers())
+
+	// Submit vote for the record
+	if s.votingManager != nil {
+		if err := s.votingManager.SubmitVote(record.Domain, true, onlineNodes); err != nil {
+			s.ReleaseLock(record.Domain, lockID)
+			return fmt.Errorf("failed to submit vote: %w", err)
+		}
 	}
 
 	// Return immediately, actual registration will happen after consensus
