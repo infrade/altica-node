@@ -107,8 +107,7 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 	}
 
 	// Initialize sync manager
-	store.syncManager = NewSyncManager(store)
-	store.syncManager.StartSync()
+	// store.syncManager = NewSyncManager(store)
 
 	// Initial sync from highest version peer
 	go func() {
@@ -461,6 +460,7 @@ func (s *RecordStore) GetPendingRecordFromDHT(domain string) (*PendingRecord, er
 	return &pending, nil
 }
 
+// TODO: implement pending records cache so that we don't hit the dht always when record is pending
 func (s *RecordStore) GetPendingDomains() ([]string, bool) {
 	indexData, err := s.dht.GetValue(s.ctx, makePendingKey(indexKey))
 	if err != nil {
@@ -469,15 +469,13 @@ func (s *RecordStore) GetPendingDomains() ([]string, bool) {
 		}
 		return nil, false
 	}
-	if indexData == nil {
-		return nil, false
-	}
+
 	var domains []string
 	if err := json.Unmarshal(indexData, &domains); err != nil {
 		s.log.WithError(err).Error("Failed to unmarshal pending records index")
 		return nil, false
 	}
-	s.log.WithField("domains", domains).Info("found domains")
+	s.log.WithField("domains", domains).Info("pending domains")
 	return domains, true
 
 }
@@ -606,46 +604,7 @@ func (rs *RecordStore) GetRecord(domain string) (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// If we have metadata, check if we need to sync
-	if metadataData != nil {
-		localVersion := record.Versions[rs.hostID]
-		if metadata.Latest.Timestamp > localVersion.Timestamp {
-			// We have a newer version, trigger sync
-			go rs.syncRecord(domain, metadata.Latest.PeerID)
-		}
-	}
-
 	return record, nil
-}
-
-// syncRecord syncs a record from a specific peer
-func (rs *RecordStore) syncRecord(domain, peerID string) error {
-	// Get record from peer
-	key := makeRecordKey(domain)
-	data, err := rs.dht.GetValue(rs.ctx, key)
-	if err != nil {
-		return err
-	}
-
-	record, err := DeserializeRecord(data)
-	if err != nil {
-		return err
-	}
-
-	// Verify hash
-	content, ok := record.Mappings["content"].([]byte)
-	if !ok {
-		return fmt.Errorf("record content not found")
-	}
-	hash := sha256.Sum256(content)
-	hashStr := hex.EncodeToString(hash[:])
-	if hashStr != record.Latest.Hash {
-		return fmt.Errorf("record hash mismatch")
-	}
-
-	// Update local record
-	return rs.UpdateRecord(domain, content)
 }
 
 // GetLatestVersion gets the latest version information for a record
@@ -855,11 +814,6 @@ func (s *RecordStore) getAllRecordsFromPeer(peerID string) ([]*Record, error) {
 	}
 
 	return records, nil
-}
-
-// GetSyncState returns the current sync state
-func (s *RecordStore) GetSyncState() *SyncState {
-	return s.syncManager.GetSyncState()
 }
 
 // ConfirmRecord finalizes a pending record registration and updates the index

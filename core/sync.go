@@ -3,9 +3,7 @@ package core
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -13,9 +11,7 @@ import (
 	"time"
 
 	"github.com/bits-and-blooms/bloom/v3"
-	"github.com/ipfs/go-datastore"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -298,163 +294,4 @@ func (n *Node) handleRegistrationIntent(msg RecordMessage) {
 			}
 		}
 	}
-}
-
-// StartSync starts the sync process
-func (sm *SyncManager) StartSync() {
-	sm.stateMutex.Lock()
-	if sm.state.IsSyncing {
-		sm.stateMutex.Unlock()
-		return
-	}
-	sm.state.IsSyncing = true
-	sm.stateMutex.Unlock()
-
-	go sm.syncLoop()
-}
-
-// StopSync stops the sync process
-func (sm *SyncManager) StopSync() {
-	sm.stateMutex.Lock()
-	sm.state.IsSyncing = false
-	sm.stateMutex.Unlock()
-}
-
-// syncLoop is the main sync loop
-func (sm *SyncManager) syncLoop() {
-	for {
-		sm.stateMutex.RLock()
-		if !sm.state.IsSyncing {
-			sm.stateMutex.RUnlock()
-			return
-		}
-		sm.stateMutex.RUnlock()
-
-		// Select peer with highest version
-		peer, err := sm.selectSyncPeer()
-		if err != nil {
-			sm.log.WithError(err).Error("Failed to select sync peer")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Sync from selected peer
-		if err := sm.syncFromPeer(peer); err != nil {
-			sm.log.WithError(err).WithField("peer", peer).Error("Sync failed")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Update sync state
-		sm.stateMutex.Lock()
-		sm.state.LastSync = time.Now()
-		sm.state.CurrentPeer = peer
-		sm.stateMutex.Unlock()
-
-		time.Sleep(30 * time.Second)
-	}
-}
-
-// selectSyncPeer selects a peer with the highest version
-func (sm *SyncManager) selectSyncPeer() (string, error) {
-	peers := sm.store.dht.RoutingTable().ListPeers()
-	if len(peers) == 0 {
-		return "", fmt.Errorf("no peers available")
-	}
-
-	var highestVersion int64
-	var selectedPeer string
-
-	for _, p := range peers {
-		version, err := sm.getPeerVersion(p)
-		if err != nil {
-			continue
-		}
-
-		if version > highestVersion {
-			highestVersion = version
-			selectedPeer = p.String()
-		}
-	}
-
-	if selectedPeer == "" {
-		return "", fmt.Errorf("no valid peers found")
-	}
-
-	return selectedPeer, nil
-}
-
-// getPeerVersion gets the version of a peer
-func (sm *SyncManager) getPeerVersion(p peer.ID) (int64, error) {
-	versionKey := "/store/version"
-	data, err := sm.store.dht.GetValue(sm.store.ctx, versionKey)
-	if err != nil {
-		return 0, err
-	}
-
-	return int64(binary.BigEndian.Uint64(data)), nil
-}
-
-// syncFromPeer syncs records from a specific peer
-func (sm *SyncManager) syncFromPeer(peerID string) error {
-	// Get peer's version
-	peerVersion, err := sm.getPeerVersion(peer.ID(peerID))
-	if err != nil {
-		return fmt.Errorf("failed to get peer version: %w", err)
-	}
-
-	// Get our version
-	ourVersion, err := sm.store.GetStoreVersion()
-	if err != nil {
-		return fmt.Errorf("failed to get our version: %w", err)
-	}
-
-	// Only sync if peer has higher version
-	if peerVersion <= ourVersion {
-		return nil
-	}
-
-	// Get all records from peer
-	records, err := sm.store.getAllRecordsFromPeer(peerID)
-	if err != nil {
-		return fmt.Errorf("failed to get records from peer: %w", err)
-	}
-
-	// Verify and store records
-	for _, record := range records {
-		if !record.Verify() {
-			sm.log.WithField("domain", record.Domain).Error("Invalid record signature during sync")
-			continue
-		}
-
-		// Store record
-		data, err := record.Serialize()
-		if err != nil {
-			sm.log.WithError(err).WithField("domain", record.Domain).Error("Failed to serialize record during sync")
-			continue
-		}
-
-		key := datastore.NewKey(makeRecordKey(record.Domain))
-		if err := sm.store.db.Put(context.Background(), key, data); err != nil {
-			sm.log.WithError(err).WithField("domain", record.Domain).Error("Failed to store record during sync")
-			continue
-		}
-	}
-
-	// Update our version
-	sm.store.version = peerVersion
-	versionData := make([]byte, 8)
-	binary.BigEndian.PutUint64(versionData, uint64(sm.store.version))
-	if err := sm.store.db.Put(context.Background(), datastore.NewKey("/store/version"), versionData); err != nil {
-		return fmt.Errorf("failed to update store version after sync: %w", err)
-	}
-
-	return nil
-}
-
-// GetSyncState returns the current sync state
-func (sm *SyncManager) GetSyncState() *SyncState {
-	sm.stateMutex.RLock()
-	defer sm.stateMutex.RUnlock()
-	return sm.state
 }

@@ -112,10 +112,6 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 	if err := s.node.Store.Add(record); err != nil {
 		return nil, fmt.Errorf("failed to register domain: %w", err)
 	}
-	if err := s.node.PublishRecord(record); err != nil {
-		_ = s.node.Store.RejectRecord(p.Domain)
-		return nil, fmt.Errorf("failed to publish registration: %w", err)
-	}
 	return record, nil
 }
 
