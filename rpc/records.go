@@ -3,12 +3,15 @@ package rpc
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"altica_node/core"
+
+	"github.com/libp2p/go-libp2p/core/routing"
 )
 
 type DomainRegisterParams struct {
@@ -31,6 +34,10 @@ type RecordAddParams struct {
 	Chain   string                 `json:"chain"`
 	Address string                 `json:"address"`
 	Proof   map[string]interface{} `json:"proof"` // e.g., {"challenge":..., "signature":...}
+}
+
+type DomainVotesParams struct {
+	Domain string `json:"domain"`
 }
 
 func (p *DomainRegisterParams) Validate() error {
@@ -64,29 +71,12 @@ func (s *RPCServer) handleDomainGet(params json.RawMessage) (interface{}, error)
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	return s.domainGet(p.Domain)
-}
-
-func (s *RPCServer) domainGet(domain string) (interface{}, error) {
-	record, found := s.node.Store.Get(domain)
+	// Get the latest version of the record
+	record, found := s.node.Store.Get(p.Domain)
 	if !found {
-		return nil, fmt.Errorf("record not found")
+		return nil, fmt.Errorf("not found")
 	}
 	return record, nil
-}
-
-// Record status handler
-func (s *RPCServer) handleDomainStatus(params json.RawMessage) (interface{}, error) {
-	var p DomainStatusParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
-	}
-
-	pending, err := s.node.Store.GetPendingRecordFromDHT(p.Domain)
-	if err != nil || pending == nil {
-		return s.domainGet(p.Domain)
-	}
-	return pending, nil
 }
 
 // Domain registration handler
@@ -100,12 +90,10 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 		return nil, fmt.Errorf("validation error: %w", err)
 	}
 
-	available, err := s.node.Store.IsDomainAvailable(p.Domain)
-	if err != nil {
-		return nil, err
-	}
+	// TODO: refactor; make it fat model, thin view
+	available, _ := s.node.Store.IsDomainAvailable(p.Domain)
 	if !available {
-		return nil, fmt.Errorf("domain is not available")
+		return nil, fmt.Errorf("domain is not available or locked for registration")
 	}
 
 	ttl := p.TTL
@@ -120,13 +108,12 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 	if err != nil {
 		return nil, err
 	}
-	record.Version = s.node.Store.GetCurrentVersion() + 1
 
 	if err := s.node.Store.Add(record); err != nil {
 		return nil, fmt.Errorf("failed to register domain: %w", err)
 	}
 	if err := s.node.PublishRecord(record); err != nil {
-		_ = s.node.Store.RejectRecord(p.Domain, record.LockID)
+		_ = s.node.Store.RejectRecord(p.Domain)
 		return nil, fmt.Errorf("failed to publish registration: %w", err)
 	}
 	return record, nil
@@ -139,9 +126,10 @@ func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error)
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	record, found := s.node.Store.Get(p.Domain)
-	if !found {
-		return nil, fmt.Errorf("domain not found")
+	// Get the latest version of the record
+	record, err := s.node.Store.GetLatestRecord(p.Domain)
+	if err != nil {
+		return nil, fmt.Errorf("domain not found: %w", err)
 	}
 
 	// Validate proof for the chain
@@ -160,6 +148,7 @@ func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error)
 	proofs := record.Metadata["proofs"].(map[string]interface{})
 	proofs[p.Chain] = p.Proof
 	record.Metadata["proofs"] = proofs
+	record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 
 	// Save updated record
 	if err := s.node.Store.Add(record); err != nil {
@@ -174,4 +163,26 @@ func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error)
 func validateProof(chain, address string, proof map[string]interface{}) bool {
 	// TODO: Implement chain-specific proof validation
 	return true
+}
+
+func (s *RPCServer) handleDomainVotes(params json.RawMessage) (interface{}, error) {
+	var p DomainVotesParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+
+	if p.Domain == "" {
+		return nil, fmt.Errorf("missing required field: domain")
+	}
+
+	// Get vote result from voting manager
+	result, err := s.node.Store.GetVoteResult(p.Domain)
+	if err != nil {
+		if errors.Is(err, routing.ErrNotFound) {
+			return nil, fmt.Errorf("no votes found for domain")
+		}
+		return nil, fmt.Errorf("failed to get votes: %w", err)
+	}
+
+	return result, nil
 }

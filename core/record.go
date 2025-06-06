@@ -10,15 +10,25 @@ import (
 
 // Record represents a robust, extensible DNS record that can support multi-chain, multi-use-case mappings.
 type Record struct {
-	Domain    string                 `json:"domain"`   // The domain name (e.g., 'sorxcode')
-	Mappings  map[string]interface{} `json:"mappings"` // Arbitrary key-value pairs: chain names, DNS types, etc.
-	TTL       time.Duration          `json:"ttl"`
-	Signature []byte                 `json:"signature"`
-	PublicKey []byte                 `json:"public_key"`
-	Version   int64                  `json:"version"`
-	Status    string                 `json:"status"`             // 'pending', 'confirmed', 'rejected'
-	LockID    string                 `json:"lock_id,omitempty"`  // For distributed locking
-	Metadata  map[string]interface{} `json:"metadata,omitempty"` // For future extensibility (e.g., owner, timestamps, etc.)
+	Domain    string                   `json:"domain"`
+	Mappings  map[string]interface{}   `json:"mappings"`           // Flexible mapping structure
+	TTL       time.Duration            `json:"ttl"`                // Time-to-live for the record
+	Signature []byte                   `json:"signature"`          // BLS signature
+	PublicKey []byte                   `json:"public_key"`         // BLS public key
+	Version   int64                    `json:"version"`            // Current version number
+	Status    string                   `json:"status"`             // Record status (active, locked, etc.)
+	LockID    string                   `json:"lock_id,omitempty"`  // ID of the lock if locked
+	Metadata  map[string]interface{}   `json:"metadata"`           // Additional metadata
+	Versions  map[string]RecordVersion `json:"versions,omitempty"` // peerID -> version
+	Latest    RecordVersion            `json:"latest,omitempty"`   // Latest version info
+}
+
+// RecordVersion represents a version of a record
+type RecordVersion struct {
+	Version   uint64 `json:"version"`
+	Timestamp int64  `json:"timestamp"`
+	PeerID    string `json:"peer_id"`
+	Hash      string `json:"hash"` // Hash of the record content
 }
 
 // NewRecord creates a new unsigned record
@@ -31,6 +41,11 @@ func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte
 		PublicKey: pubKey,
 		Metadata:  make(map[string]interface{}),
 	}
+
+	// Initialize versioning
+	record.Versions = make(map[string]RecordVersion)
+	record.Metadata["created_at"] = time.Now().UTC().Format(time.RFC3339)
+
 	if !record.Verify() {
 		return nil, fmt.Errorf("Record verification failed")
 	}
@@ -61,12 +76,12 @@ func (r *Record) Verify() bool {
 	return ed25519.Verify(r.PublicKey, data, r.Signature)
 }
 
-// Serialize encodes the full record
+// Serialize serializes the record to bytes
 func (r *Record) Serialize() ([]byte, error) {
 	return json.Marshal(r)
 }
 
-// DeserializeRecord parses a serialized record
+// DeserializeRecord deserializes bytes into a Record
 func DeserializeRecord(data []byte) (*Record, error) {
 	var r Record
 	if err := json.Unmarshal(data, &r); err != nil {

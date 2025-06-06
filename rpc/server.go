@@ -86,7 +86,7 @@ func (s *RPCServer) methods() map[string]func(json.RawMessage) (interface{}, err
 		// Record management
 		"domain.register": s.handleDomainRegister,
 		"domain.get":      s.handleDomainGet,
-		"domain.status":   s.handleDomainStatus,
+		"domain.votes":    s.handleDomainVotes,
 		"record.add":      s.handleRecordAdd,
 
 		// DHT operations

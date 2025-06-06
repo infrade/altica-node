@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"crypto/sha256"
+	"encoding/binary"
+
 	"github.com/drand/kyber"
 	"github.com/drand/kyber/pairing/bn256"
 	"github.com/drand/kyber/sign/bls"
@@ -16,7 +19,10 @@ import (
 )
 
 const (
-	voteNamespace = "/altica/votes"
+	voteNamespace   = "/altica/votes"
+	decisionTimeout = 30 * time.Second // Timeout for decision maker
+	maxAttempts     = 3                // Maximum number of decision maker attempts
+	maxRetries      = 3                // Maximum number of retries for optimistic updates
 )
 
 // Vote represents a single vote with threshold signature
@@ -31,23 +37,28 @@ type Vote struct {
 
 // VoteResult tracks the consensus state for a domain
 type VoteResult struct {
-	Domain      string           `json:"domain"`
-	Votes       map[string]*Vote `json:"votes"` // peerID -> vote
-	Threshold   int              `json:"threshold"`
-	TotalVotes  int              `json:"total_votes"`
-	Consensus   bool             `json:"consensus"`    // true if consensus reached
-	Decision    bool             `json:"decision"`     // final decision if consensus reached
-	Signature   []byte           `json:"signature"`    // aggregated threshold signature
-	OnlineNodes int              `json:"online_nodes"` // Number of nodes online at registration intent
+	Domain        string           `json:"domain"`
+	Votes         map[string]*Vote `json:"votes"` // peerID -> vote
+	Threshold     int              `json:"threshold"`
+	TotalVotes    int              `json:"total_votes"`
+	Consensus     bool             `json:"consensus"`      // true if consensus reached
+	Decision      bool             `json:"decision"`       // final decision if consensus reached
+	Signature     []byte           `json:"signature"`      // aggregated threshold signature
+	OnlineNodes   int              `json:"online_nodes"`   // Number of nodes online at registration intent
+	DecisionMaker string           `json:"decision_maker"` // ID of the peer responsible for making the final decision
+	LastUpdated   int64            `json:"last_updated"`   // Timestamp of last update
+	Attempts      int              `json:"attempts"`       // Number of decision maker attempts
 }
 
 // VotingManager handles threshold signature voting
 type VotingManager struct {
-	store   *RecordStore
-	suite   *bn256.Suite
-	privKey kyber.Scalar
-	pubKey  kyber.Point
-	mu      sync.RWMutex
+	store            *RecordStore
+	suite            *bn256.Suite
+	privKey          kyber.Scalar
+	pubKey           kyber.Point
+	mu               sync.RWMutex
+	decisionInterval time.Duration // Interval for periodic decision making
+	stopChan         chan struct{} // Channel to stop periodic decision making
 }
 
 // NewVotingManager creates a new voting manager
@@ -60,15 +71,105 @@ func NewVotingManager(store *RecordStore, privKey kyber.Scalar) (*VotingManager,
 	}
 
 	suite := bn256.NewSuite()
-	// privKey := suite.G1().Scalar().Pick(random.New())
 	pubKey := suite.G1().Point().Base().Mul(privKey, nil)
 
-	return &VotingManager{
-		store:   store,
-		privKey: privKey,
-		pubKey:  pubKey,
-		suite:   suite,
-	}, nil
+	vm := &VotingManager{
+		store:            store,
+		privKey:          privKey,
+		pubKey:           pubKey,
+		suite:            suite,
+		decisionInterval: 15 * time.Second, // Default interval
+		stopChan:         make(chan struct{}),
+	}
+
+	// Start periodic decision making
+	go vm.periodicDecisionMaking()
+
+	return vm, nil
+}
+
+// SetDecisionInterval sets the interval for periodic decision making
+func (vm *VotingManager) SetDecisionInterval(interval time.Duration) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	vm.decisionInterval = interval
+}
+
+// Stop stops the periodic decision making
+func (vm *VotingManager) Stop() {
+	close(vm.stopChan)
+}
+
+// periodicDecisionMaking periodically checks and makes decisions for pending records
+func (vm *VotingManager) periodicDecisionMaking() {
+	ticker := time.NewTicker(vm.decisionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			vm.processPendingRecords()
+		case <-vm.stopChan:
+			return
+		}
+	}
+}
+
+// processPendingRecords processes all pending records
+func (vm *VotingManager) processPendingRecords() {
+	// Get only pending records from DHT
+	domains, ok := vm.store.GetPendingDomains()
+	if !ok {
+		vm.store.log.WithField("domains", domains).Info("No pending record found")
+		return
+	}
+
+	for _, domain := range domains {
+		// Get vote result for this domain
+		result, err := vm.getVoteResult(domain)
+		if err != nil {
+			if errors.Is(err, routing.ErrNotFound) {
+				continue // No votes yet
+			}
+			vm.store.log.WithError(err).WithField("domain", domain).Error("Failed to get vote result")
+			continue
+		}
+
+		// Check if we are the decision maker
+		if vm.store.hostID == result.DecisionMaker {
+			// Make decision if we have enough votes
+			if result.TotalVotes >= result.Threshold {
+				if err := vm.decide(result); err != nil {
+					vm.store.log.WithError(err).WithField("domain", domain).Error("Failed to make decision")
+				}
+			}
+			continue
+		}
+
+		// Check if decision maker is still available
+		peers := vm.store.OnlineNodes()
+		decisionMakerAvailable := false
+		for _, peer := range peers {
+			if peer.String() == result.DecisionMaker {
+				decisionMakerAvailable = true
+				break
+			}
+		}
+
+		// If decision maker is unavailable or timeout reached, select new decision maker
+		if !decisionMakerAvailable ||
+			(time.Now().UnixNano()-result.LastUpdated) > decisionTimeout.Nanoseconds() {
+			if result.Attempts >= maxAttempts {
+				// If max attempts reached, select new decision maker from remaining peers
+				result.DecisionMaker = vm.selectDecisionMaker(domain, len(peers))
+				result.Attempts = 0
+			} else {
+				result.Attempts++
+				fmt.Println("Attempt: ", result.Attempts)
+			}
+			result.LastUpdated = time.Now().UnixNano()
+		}
+	}
 }
 
 // makeVoteKey creates a DHT key for votes
@@ -77,7 +178,7 @@ func makeVoteKey(domain string) string {
 }
 
 // SubmitVote submits a vote with threshold signature
-func (vm *VotingManager) SubmitVote(domain string, decision bool, onlineNodes int) error {
+func (vm *VotingManager) SubmitVote(domain string, decision bool) error {
 	vote := &Vote{
 		Domain:    domain,
 		PeerID:    vm.store.hostID,
@@ -104,26 +205,43 @@ func (vm *VotingManager) SubmitVote(domain string, decision bool, onlineNodes in
 		if !errors.Is(err, routing.ErrNotFound) {
 			return err
 		}
+		onlineNodes := vm.store.OnlineNodesCount()
+		decisionMaker := vm.selectDecisionMaker(domain, onlineNodes)
 		result = &VoteResult{
-			Domain:      domain,
-			Votes:       make(map[string]*Vote),
-			OnlineNodes: onlineNodes,
-			Threshold:   (onlineNodes * 2) / 3,
+			Domain:        domain,
+			Votes:         make(map[string]*Vote),
+			OnlineNodes:   onlineNodes,
+			Threshold:     (onlineNodes * 2) / 3,
+			DecisionMaker: decisionMaker,
+			LastUpdated:   time.Now().UnixNano(),
+			Attempts:      0,
 		}
 	}
 
 	result.Votes[vm.store.hostID] = vote
 	result.TotalVotes = len(result.Votes)
 
-	err = vm.decide(result)
-	if err != nil {
-		return err
-	}
-
 	return vm.saveVoteResult(domain, result)
 }
 
+// selectDecisionMaker selects a deterministic decision maker based on domain and online nodes
+func (vm *VotingManager) selectDecisionMaker(domain string, onlineNodesCount int) string {
+	if onlineNodesCount == 0 {
+		return vm.store.hostID
+	}
+	// Use domain hash to select a peer
+	hash := sha256.Sum256([]byte(domain))
+	index := int(binary.BigEndian.Uint64(hash[:8])) % onlineNodesCount
+
+	// Get sorted list of online peers
+	peers := vm.store.OnlineNodes()
+	fmt.Println("peers: ", peers)
+
+	return peers[index].String()
+}
+
 func (vm *VotingManager) decide(result *VoteResult) error {
+	// TODO: Persist voting result to local cache
 	if result.TotalVotes >= result.Threshold {
 		accepts := 0
 		for _, v := range result.Votes {
@@ -131,34 +249,39 @@ func (vm *VotingManager) decide(result *VoteResult) error {
 				accepts++
 			}
 		}
+		// TODO: add better consensus condition
 		result.Consensus = true
 		result.Decision = accepts > result.TotalVotes/2
 
-		if result.Consensus {
-			signatures := make([][]byte, 0, len(result.Votes))
-			for _, v := range result.Votes {
-				signatures = append(signatures, v.Signature)
-			}
-			aggSig := vm.suite.G1().Point().Null()
-			for _, sig := range signatures {
-				sigPoint := vm.suite.G1().Point()
-				if err := sigPoint.UnmarshalBinary(sig); err != nil {
-					return fmt.Errorf("failed to unmarshal signature: %w", err)
-				}
-				aggSig.Add(aggSig, sigPoint)
-			}
-			aggSigBytes, err := aggSig.MarshalBinary()
-			if err != nil {
-				return fmt.Errorf("failed to marshal aggregated signature: %w", err)
-			}
-			result.Signature = aggSigBytes
-
-			if err := vm.saveConsensusResult(result); err != nil {
-				return fmt.Errorf("failed to save consensus result: %w", err)
-			}
-
-			vm.store.ConfirmRecord(d)
+		if !result.Consensus {
+			return nil
 		}
+		signatures := make([][]byte, 0, len(result.Votes))
+		for _, v := range result.Votes {
+			signatures = append(signatures, v.Signature)
+		}
+		aggSig := vm.suite.G1().Point().Null()
+		for _, sig := range signatures {
+			sigPoint := vm.suite.G1().Point()
+			if err := sigPoint.UnmarshalBinary(sig); err != nil {
+				return fmt.Errorf("failed to unmarshal signature: %w", err)
+			}
+			aggSig.Add(aggSig, sigPoint)
+		}
+		aggSigBytes, err := aggSig.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("failed to marshal aggregated signature: %w", err)
+		}
+		result.Signature = aggSigBytes
+
+		if err := vm.saveConsensusResult(result); err != nil {
+			return fmt.Errorf("failed to save consensus result: %w", err)
+		}
+
+		if err := vm.store.ConfirmRecord(result.Domain); err != nil {
+			return fmt.Errorf("Unable to confirm record after consensus: %w", err)
+		}
+
 	}
 	return nil
 }

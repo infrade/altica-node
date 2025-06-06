@@ -3,14 +3,20 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/bits-and-blooms/bloom/v3"
+	"github.com/ipfs/go-datastore"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -40,8 +46,34 @@ type RecordMessage struct {
 	Consensus  map[string]bool `json:"consensus,omitempty"` // Map of peer IDs to their vote (true=confirm, false=reject)
 }
 
-// Add a global for vote tracking (in-memory for now)
-var voteTracker = make(map[string]map[string]bool) // domain -> peerID -> vote (true=accept, false=reject)
+// SyncState represents the current state of synchronization
+type SyncState struct {
+	Version     int64
+	LastSync    time.Time
+	IsSyncing   bool
+	CurrentPeer string
+}
+
+// SyncManager manages the synchronization of records between peers
+type SyncManager struct {
+	store      *RecordStore
+	state      *SyncState
+	stateMutex sync.RWMutex
+	log        *logrus.Logger
+}
+
+// NewSyncManager creates a new sync manager
+func NewSyncManager(store *RecordStore) *SyncManager {
+	return &SyncManager{
+		store: store,
+		state: &SyncState{
+			Version:   0,
+			LastSync:  time.Time{},
+			IsSyncing: false,
+		},
+		log: logrus.New(),
+	}
+}
 
 func (s *RecordStore) computeStateRoot() []byte {
 	hash := sha256.New()
@@ -97,18 +129,26 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 		}
 		fmt.Println("successfully unmarshalled", recordMsg.Version, n.Store.GetCurrentVersion())
 
-		// skip if node is publisher
-		if recordMsg.PeerID == n.getID() {
-			fmt.Println("publisher skipping self-published record")
-			continue
-		}
+		// // skip if node is publisher
+		// if recordMsg.PeerID == n.getID() {
+		// 	fmt.Println("publisher skipping self-published record")
+		// 	continue
+		// }
 
 		// Check if we need this update based on version and state root
-		if recordMsg.Version <= n.Store.GetCurrentVersion() {
-			n.log.WithField("version", recordMsg.Version).Debug("Ignoring outdated record update")
-			continue
+		for _, record := range recordMsg.Records {
+			if existingRecord, err := n.Store.GetLatestRecord(record.Domain); err == nil {
+				if existingRecord.Version >= record.Version {
+					n.log.WithFields(logrus.Fields{
+						"domain":         record.Domain,
+						"local_version":  existingRecord.Version,
+						"remote_version": record.Version,
+					}).Debug("Ignoring outdated record update")
+					continue
+				}
+			}
+			fmt.Println("Processing record update:", record.Version, record.Domain)
 		}
-		fmt.Println("Processing record update:", recordMsg.Version)
 
 		switch recordMsg.Type {
 		case "snapshot":
@@ -120,35 +160,7 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 			// Each peer votes on the record
 			n.handleRegistrationIntent(recordMsg)
 		case "vote":
-			// Tally votes
-			for _, record := range recordMsg.Records {
-				domain := record.Domain
-				if voteTracker[domain] == nil {
-					voteTracker[domain] = make(map[string]bool)
-				}
-				voteTracker[domain][recordMsg.PeerID] = recordMsg.Consensus[recordMsg.PeerID]
-				// Check if 51%+ accept or reject
-				totalPeers := len(n.ListPeers())
-				accepts, rejects := 0, 0
-				for _, v := range voteTracker[domain] {
-					if v {
-						accepts++
-					} else {
-						rejects++
-					}
-				}
-				threshold := totalPeers/2 + 1
-				if accepts >= threshold {
-					n.log.Infof("Consensus reached: ACCEPT for %s", domain)
-					// Confirm record
-					n.Store.ConfirmRecord(domain, record.LockID)
-					delete(voteTracker, domain)
-				} else if rejects >= threshold {
-					n.log.Infof("Consensus reached: REJECT for %s", domain)
-					n.Store.RejectRecord(domain, record.LockID)
-					delete(voteTracker, domain)
-				}
-			}
+			continue
 		case "batch":
 			fmt.Println("Processing batch update")
 			// Check bloom filter first
@@ -184,101 +196,6 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 				for n.Store.GetCurrentVersion() < recordMsg.Version {
 					n.Store.IncrementVersion()
 				}
-			}
-		}
-	}
-}
-
-func (n *Node) periodicRecordSync(topic *pubsub.Topic) {
-	syncTicker := time.NewTicker(time.Second * 10)
-	snapshotTicker := time.NewTicker(SnapshotInterval)
-	defer syncTicker.Stop()
-	defer snapshotTicker.Stop()
-
-	for {
-		select {
-		case <-n.Context.Done():
-			fmt.Println("Context done, stopping periodic sync")
-			return
-
-		case <-snapshotTicker.C:
-			// Create and publish state snapshot
-			fmt.Println("Creating snapshot")
-			filter := n.Store.filter
-			if filter == nil {
-				filter = bloom.New(BloomFilterSize, 5)
-				n.Store.filter = filter
-			}
-			snapshot := StateSnapshot{
-				StateRoot: n.Store.computeStateRoot(),
-				Timestamp: time.Now(),
-				Version:   n.Store.GetCurrentVersion(),
-				Filter:    filter,
-			}
-
-			if err := n.publishSnapshot(topic, snapshot); err != nil {
-				n.log.WithError(err).Error("Failed to publish snapshot")
-			}
-
-		case <-syncTicker.C:
-			fmt.Println("Syncing records")
-			// Regular sync with optimizations
-			newRecords, err := n.Store.ListModifiedSince(n.lastSync)
-			if err != nil {
-				n.log.WithError(err).Error("Failed to list modified records")
-				continue
-			}
-			fmt.Println("New records to sync:", len(newRecords))
-			if len(newRecords) == 0 {
-				continue
-			}
-
-			// Create bloom filter for this batch
-			filter := bloom.New(BloomFilterSize, 5)
-			for _, record := range newRecords {
-				filter.Add([]byte(record.Domain))
-			}
-
-			// Send records in optimized batches
-			for i := 0; i < len(newRecords); i += BatchSize {
-				end := i + BatchSize
-				if end > len(newRecords) {
-					end = len(newRecords)
-				}
-
-				batch := newRecords[i:end]
-				mfilter, err := filter.MarshalBinary()
-				if err != nil {
-					n.log.WithError(err).Error("Failed to marshal bloom filter")
-					continue
-				}
-				// Convert []*Record to []Record
-				records := make([]Record, len(batch))
-				for j, rec := range batch {
-					records[j] = *rec
-				}
-				msg := RecordMessage{
-					Type:       "batch",
-					Records:    records,
-					StateRoot:  n.Store.computeStateRoot(),
-					Version:    n.Store.GetCurrentVersion(),
-					Filter:     mfilter,
-					BatchRange: [2]int64{int64(i), int64(end)},
-				}
-
-				// Compress and publish
-				if err := n.publishBatch(topic, msg); err != nil {
-					n.log.WithError(err).Error("Failed to publish batch")
-				}
-
-				// Exponential backoff between batches
-				time.Sleep(time.Millisecond * 100 * time.Duration(1<<uint(i/BatchSize)))
-			}
-			// Update last sync time after successful batch sync
-			now := time.Now()
-			n.lastSync = now
-			if err := n.Store.SetLastSyncTime(now); err != nil {
-				n.log.WithError(err).Error("Failed to save last sync time")
 			}
 		}
 	}
@@ -366,26 +283,184 @@ func (n *Node) publishBatch(topic *pubsub.Topic, msg RecordMessage) error {
 }
 
 func (n *Node) handleRegistrationIntent(msg RecordMessage) {
-	for _, record := range msg.Records {
+	for _, entry := range msg.Records {
 		// Each peer validates the record
 		accept := false
-		if !record.Verify() {
+		record, found := n.Store.Get(entry.Domain)
+		if !found {
+			n.log.Error("record not found")
+		} else if record.Status != "pending" {
+			n.log.Error("Record is not pending")
+		} else if !record.Verify() {
 			n.log.Error("Invalid record signature")
-			accept = false
-		} else if available, _ := n.Store.IsDomainAvailable(record.Domain); !available {
-			accept = false
 		} else {
 			accept = true
 		}
 
-		// Get number of online nodes
-		onlineNodes := len(n.DHT.RoutingTable().ListPeers())
-
 		// Submit vote using voting manager
 		if n.Store.votingManager != nil {
-			if err := n.Store.votingManager.SubmitVote(record.Domain, accept, onlineNodes); err != nil {
+			if err := n.Store.votingManager.SubmitVote(record.Domain, accept); err != nil {
 				n.log.WithError(err).Error("Failed to submit vote")
 			}
 		}
 	}
+}
+
+// StartSync starts the sync process
+func (sm *SyncManager) StartSync() {
+	sm.stateMutex.Lock()
+	if sm.state.IsSyncing {
+		sm.stateMutex.Unlock()
+		return
+	}
+	sm.state.IsSyncing = true
+	sm.stateMutex.Unlock()
+
+	go sm.syncLoop()
+}
+
+// StopSync stops the sync process
+func (sm *SyncManager) StopSync() {
+	sm.stateMutex.Lock()
+	sm.state.IsSyncing = false
+	sm.stateMutex.Unlock()
+}
+
+// syncLoop is the main sync loop
+func (sm *SyncManager) syncLoop() {
+	for {
+		sm.stateMutex.RLock()
+		if !sm.state.IsSyncing {
+			sm.stateMutex.RUnlock()
+			return
+		}
+		sm.stateMutex.RUnlock()
+
+		// Select peer with highest version
+		peer, err := sm.selectSyncPeer()
+		if err != nil {
+			sm.log.WithError(err).Error("Failed to select sync peer")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Sync from selected peer
+		if err := sm.syncFromPeer(peer); err != nil {
+			sm.log.WithError(err).WithField("peer", peer).Error("Sync failed")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Update sync state
+		sm.stateMutex.Lock()
+		sm.state.LastSync = time.Now()
+		sm.state.CurrentPeer = peer
+		sm.stateMutex.Unlock()
+
+		time.Sleep(30 * time.Second)
+	}
+}
+
+// selectSyncPeer selects a peer with the highest version
+func (sm *SyncManager) selectSyncPeer() (string, error) {
+	peers := sm.store.dht.RoutingTable().ListPeers()
+	if len(peers) == 0 {
+		return "", fmt.Errorf("no peers available")
+	}
+
+	var highestVersion int64
+	var selectedPeer string
+
+	for _, p := range peers {
+		version, err := sm.getPeerVersion(p)
+		if err != nil {
+			continue
+		}
+
+		if version > highestVersion {
+			highestVersion = version
+			selectedPeer = p.String()
+		}
+	}
+
+	if selectedPeer == "" {
+		return "", fmt.Errorf("no valid peers found")
+	}
+
+	return selectedPeer, nil
+}
+
+// getPeerVersion gets the version of a peer
+func (sm *SyncManager) getPeerVersion(p peer.ID) (int64, error) {
+	versionKey := "/store/version"
+	data, err := sm.store.dht.GetValue(sm.store.ctx, versionKey)
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(binary.BigEndian.Uint64(data)), nil
+}
+
+// syncFromPeer syncs records from a specific peer
+func (sm *SyncManager) syncFromPeer(peerID string) error {
+	// Get peer's version
+	peerVersion, err := sm.getPeerVersion(peer.ID(peerID))
+	if err != nil {
+		return fmt.Errorf("failed to get peer version: %w", err)
+	}
+
+	// Get our version
+	ourVersion, err := sm.store.GetStoreVersion()
+	if err != nil {
+		return fmt.Errorf("failed to get our version: %w", err)
+	}
+
+	// Only sync if peer has higher version
+	if peerVersion <= ourVersion {
+		return nil
+	}
+
+	// Get all records from peer
+	records, err := sm.store.getAllRecordsFromPeer(peerID)
+	if err != nil {
+		return fmt.Errorf("failed to get records from peer: %w", err)
+	}
+
+	// Verify and store records
+	for _, record := range records {
+		if !record.Verify() {
+			sm.log.WithField("domain", record.Domain).Error("Invalid record signature during sync")
+			continue
+		}
+
+		// Store record
+		data, err := record.Serialize()
+		if err != nil {
+			sm.log.WithError(err).WithField("domain", record.Domain).Error("Failed to serialize record during sync")
+			continue
+		}
+
+		key := datastore.NewKey(makeRecordKey(record.Domain))
+		if err := sm.store.db.Put(context.Background(), key, data); err != nil {
+			sm.log.WithError(err).WithField("domain", record.Domain).Error("Failed to store record during sync")
+			continue
+		}
+	}
+
+	// Update our version
+	sm.store.version = peerVersion
+	versionData := make([]byte, 8)
+	binary.BigEndian.PutUint64(versionData, uint64(sm.store.version))
+	if err := sm.store.db.Put(context.Background(), datastore.NewKey("/store/version"), versionData); err != nil {
+		return fmt.Errorf("failed to update store version after sync: %w", err)
+	}
+
+	return nil
+}
+
+// GetSyncState returns the current sync state
+func (sm *SyncManager) GetSyncState() *SyncState {
+	sm.stateMutex.RLock()
+	defer sm.stateMutex.RUnlock()
+	return sm.state
 }
