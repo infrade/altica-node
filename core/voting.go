@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"github.com/drand/kyber"
 	"github.com/drand/kyber/pairing/bn256"
 	"github.com/drand/kyber/sign/bls"
-	"github.com/ipfs/go-datastore"
 	"github.com/libp2p/go-libp2p/core/routing"
 )
 
@@ -179,6 +177,27 @@ func makeVoteKey(domain string) string {
 
 // SubmitVote submits a vote with threshold signature
 func (vm *VotingManager) SubmitVote(domain string, decision bool) error {
+	result, err := vm.getVoteResult(domain)
+	if err != nil {
+		if !errors.Is(err, routing.ErrNotFound) {
+			return err
+		}
+		onlineNodes := vm.store.OnlineNodesCount()
+		decisionMaker := vm.selectDecisionMaker(domain, onlineNodes)
+		result = &VoteResult{
+			Domain:        domain,
+			Votes:         make(map[string]*Vote),
+			OnlineNodes:   onlineNodes,
+			Threshold:     (onlineNodes * 2) / 3,
+			DecisionMaker: decisionMaker,
+			LastUpdated:   time.Now().UnixNano(),
+			Attempts:      0,
+		}
+	}
+	if result.Consensus || result.Decision {
+		return fmt.Errorf("Domain already reached consensus/decision")
+	}
+
 	vote := &Vote{
 		Domain:    domain,
 		PeerID:    vm.store.hostID,
@@ -200,28 +219,10 @@ func (vm *VotingManager) SubmitVote(domain string, decision bool) error {
 	}
 	vote.PublicKey = pubKeyBytes
 
-	result, err := vm.getVoteResult(domain)
-	if err != nil {
-		if !errors.Is(err, routing.ErrNotFound) {
-			return err
-		}
-		onlineNodes := vm.store.OnlineNodesCount()
-		decisionMaker := vm.selectDecisionMaker(domain, onlineNodes)
-		result = &VoteResult{
-			Domain:        domain,
-			Votes:         make(map[string]*Vote),
-			OnlineNodes:   onlineNodes,
-			Threshold:     (onlineNodes * 2) / 3,
-			DecisionMaker: decisionMaker,
-			LastUpdated:   time.Now().UnixNano(),
-			Attempts:      0,
-		}
-	}
-
 	result.Votes[vm.store.hostID] = vote
 	result.TotalVotes = len(result.Votes)
 
-	return vm.saveVoteResult(domain, result)
+	return vm.saveVoteResult(result)
 }
 
 // selectDecisionMaker selects a deterministic decision maker based on domain and online nodes
@@ -274,7 +275,7 @@ func (vm *VotingManager) decide(result *VoteResult) error {
 		}
 		result.Signature = aggSigBytes
 
-		if err := vm.saveConsensusResult(result); err != nil {
+		if err := vm.saveVoteResult(result); err != nil {
 			return fmt.Errorf("failed to save consensus result: %w", err)
 		}
 
@@ -302,23 +303,13 @@ func (vm *VotingManager) getVoteResult(domain string) (*VoteResult, error) {
 }
 
 // saveVoteResult saves vote result to DHT
-func (vm *VotingManager) saveVoteResult(domain string, result *VoteResult) error {
-	key := makeVoteKey(domain)
+func (vm *VotingManager) saveVoteResult(result *VoteResult) error {
+	key := makeVoteKey(result.Domain)
 	data, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
 	return vm.store.dht.PutValue(vm.store.ctx, key, data)
-}
-
-// saveConsensusResult saves consensus result to LevelDB
-func (vm *VotingManager) saveConsensusResult(result *VoteResult) error {
-	key := datastore.NewKey(fmt.Sprintf("/consensus/%s", result.Domain))
-	data, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	return vm.store.db.Put(context.Background(), key, data)
 }
 
 // VerifyVote verifies a single vote's signature

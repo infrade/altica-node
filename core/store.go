@@ -31,21 +31,19 @@ type PendingRecord struct {
 }
 
 type RecordStore struct {
-	db             *leveldb.Datastore
-	dht            *dht.IpfsDHT
-	ctx            context.Context
-	hostID         string
-	log            *logrus.Logger
-	pendingLocks   map[string]string // domain -> lockID
-	lockMutex      sync.RWMutex
-	recordsMutex   sync.RWMutex       // For operations on confirmed records
-	version        int64              // Current version number
-	filter         *bloom.BloomFilter // Bloom filter for fast lookups
-	votingManager  *VotingManager     // Added for voting functionality
-	privKey        kyber.Scalar       // Node's private key for voting
-	pendingRecords map[string]*Record // Local cache of pending records
-	pendingMutex   sync.RWMutex       // Mutex for pending records
-	syncManager    *SyncManager       // Sync manager for record synchronization
+	db            *leveldb.Datastore
+	dht           *dht.IpfsDHT
+	ctx           context.Context
+	hostID        string
+	log           *logrus.Logger
+	pendingLocks  map[string]string // domain -> lockID
+	lockMutex     sync.RWMutex
+	recordsMutex  sync.RWMutex       // For operations on confirmed records
+	version       int64              // Current version number
+	filter        *bloom.BloomFilter // Bloom filter for fast lookups
+	votingManager *VotingManager     // Added for voting functionality
+	privKey       kyber.Scalar       // Node's private key for voting
+	syncManager   *SyncManager       // Sync manager for record synchronization
 }
 
 // convertCryptoPrivKeyToKyber converts a crypto private key to a Kyber scalar
@@ -89,14 +87,13 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 	}
 
 	store := &RecordStore{
-		db:             db,
-		dht:            dht,
-		ctx:            ctx,
-		hostID:         hostID,
-		log:            logrus.New(),
-		pendingLocks:   make(map[string]string),
-		version:        0,
-		pendingRecords: make(map[string]*Record),
+		db:           db,
+		dht:          dht,
+		ctx:          ctx,
+		hostID:       hostID,
+		log:          logrus.New(),
+		pendingLocks: make(map[string]string),
+		version:      0,
 	}
 
 	// Initialize voting manager with converted private key
@@ -112,9 +109,6 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 	// Initialize sync manager
 	store.syncManager = NewSyncManager(store)
 	store.syncManager.StartSync()
-
-	// Start periodic sync of pending records
-	store.StartSync(30 * time.Second) // Sync every 30 seconds
 
 	// Initial sync from highest version peer
 	go func() {
@@ -156,6 +150,16 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 
 // will try to get domain from localstore, and dht.
 func (s *RecordStore) Get(domain string) (*Record, bool) {
+	getLatestVersion := func() (*Record, bool) {
+		// If still not found, try getting latest from DHT
+		record, err := s.GetLatestRecord(domain)
+		if err == nil && record != nil {
+			s.SaveRecord(*record)
+			return record, true
+		}
+		return nil, false
+	}
+
 	s.lockMutex.RLock()
 	defer s.lockMutex.RUnlock()
 
@@ -165,6 +169,9 @@ func (s *RecordStore) Get(domain string) (*Record, bool) {
 	if err == nil && data != nil {
 		record, err := DeserializeRecord(data)
 		if err == nil && record != nil {
+			if record.Status == "pending" {
+				return getLatestVersion()
+			}
 			return record, true
 		}
 	}
@@ -175,13 +182,58 @@ func (s *RecordStore) Get(domain string) (*Record, bool) {
 		return pending.Record, true
 	}
 
-	// If still not found, try getting latest from DHT
-	record, err := s.GetLatestRecord(domain)
-	if err == nil && record != nil {
-		return record, true
+	return getLatestVersion()
+}
+
+func (s *RecordStore) List() []*Record {
+	s.recordsMutex.RLock()
+	defer s.recordsMutex.RUnlock()
+
+	q := query.Query{
+		Prefix: "/record/", // Fixed prefix to match other methods
+	}
+	results, err := s.db.Query(context.Background(), q)
+	if err != nil {
+		return nil
+	}
+	defer results.Close()
+
+	var records []*Record
+	for result := range results.Next() {
+		if result.Error != nil {
+			continue
+		}
+		record, err := DeserializeRecord(result.Value)
+		if err != nil {
+			continue
+		}
+		records = append(records, record)
 	}
 
-	return nil, false
+	return records
+}
+
+// IsDomainAvailable checks if a domain is available for registration
+func (s *RecordStore) IsDomainAvailable(domain string) (bool, error) {
+	// Check confirmed records
+	if _, found := s.Get(domain); found {
+		return false, nil
+	}
+
+	// Check pending records in DHT
+	pending, err := s.GetPendingRecordFromDHT(domain)
+	if err != nil {
+		// If the error is a DHT not found error, treat as available
+		if errors.Is(err, routing.ErrNotFound) {
+			return true, nil
+		}
+		return false, err
+	}
+	if pending != nil {
+		return false, fmt.Errorf("domain locked for registration")
+	}
+	return true, nil
+
 }
 
 const (
@@ -296,11 +348,6 @@ func (s *RecordStore) Add(record *Record) error {
 		}
 	}
 
-	// Add to local pending records cache
-	s.pendingMutex.Lock()
-	s.pendingRecords[record.Domain] = record
-	s.pendingMutex.Unlock()
-
 	// Return immediately, actual registration will happen after consensus
 	return nil
 }
@@ -310,11 +357,50 @@ func makePendingKey(domain string) string {
 	return fmt.Sprintf("/altica/pending/%s", strings.ToLower(domain))
 }
 
+// TryAcquireIndexLock attempts to acquire the index lock with exponential backoff
+func (s *RecordStore) TryAcquireIndexLock() (string, bool) {
+
+	// Exponential backoff parameters
+	maxAttempts := 5
+	initialBackoff := 100 * time.Millisecond
+	maxBackoff := 2 * time.Second
+	timeout := 10 * time.Second
+	startTime := time.Now()
+	var lockID string
+	var acquired bool
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Check if we've exceeded the timeout
+		if time.Since(startTime) > timeout {
+			s.log.Error("Index lock acquisition timed out")
+			return "", false
+		}
+
+		lockID, acquired = s.TryAcquireLock(indexKey)
+		// First check if a lock already exists
+		if !acquired {
+			// Calculate backoff duration with exponential increase
+			backoff := initialBackoff * time.Duration(1<<uint(attempt))
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			time.Sleep(backoff)
+			continue
+		}
+
+		// Store locally as well
+		s.pendingLocks[indexKey] = lockID
+		return lockID, true
+	}
+
+	s.log.Error("Failed to acquire index lock after maximum attempts")
+	return "", false
+}
+
 // SavePendingRecordToDHT saves a pending record to DHT and updates the index
 func (s *RecordStore) SavePendingRecordToDHT(record PendingRecord) error {
-	// First acquire lock on the index
-
-	lockID, acquired := s.TryAcquireLock(indexKey)
+	// First acquire lock on the index with backoff
+	lockID, acquired := s.TryAcquireIndexLock()
 	if !acquired {
 		return fmt.Errorf("failed to acquire lock for pending index")
 	}
@@ -357,15 +443,6 @@ func (s *RecordStore) SavePendingRecordToDHT(record PendingRecord) error {
 
 // GetPendingRecordFromDHT gets a pending record from DHT
 func (s *RecordStore) GetPendingRecordFromDHT(domain string) (*PendingRecord, error) {
-	// First try to get from our local cache
-	s.pendingMutex.RLock()
-	if record, exists := s.pendingRecords[domain]; exists {
-		s.pendingMutex.RUnlock()
-		return &PendingRecord{Record: record}, nil
-	}
-	s.pendingMutex.RUnlock()
-
-	// If not in cache, query DHT
 	key := makePendingKey(domain)
 	data, err := s.dht.GetValue(s.ctx, key)
 	if err != nil {
@@ -381,16 +458,7 @@ func (s *RecordStore) GetPendingRecordFromDHT(domain string) (*PendingRecord, er
 		s.log.WithError(err).Error("Failed to unmarshal pending record")
 		return nil, err
 	}
-
-	if pending.Record != nil {
-		// Add to local cache
-		s.pendingMutex.Lock()
-		s.pendingRecords[domain] = pending.Record
-		s.pendingMutex.Unlock()
-		return &pending, nil
-	}
-
-	return nil, routing.ErrNotFound
+	return &pending, nil
 }
 
 func (s *RecordStore) GetPendingDomains() ([]string, bool) {
@@ -409,6 +477,7 @@ func (s *RecordStore) GetPendingDomains() ([]string, bool) {
 		s.log.WithError(err).Error("Failed to unmarshal pending records index")
 		return nil, false
 	}
+	s.log.WithField("domains", domains).Info("found domains")
 	return domains, true
 
 }
@@ -599,10 +668,10 @@ func (rs *RecordStore) GetLatestVersion(domain string) (*RecordVersion, error) {
 
 // GetLatestRecord gets the latest version of a record from the peer with the most recent version
 func (rs *RecordStore) GetLatestRecord(domain string) (*Record, error) {
-	metadata, err := rs.GetLatestVersion(domain)
-	if err != nil {
-		return nil, err
-	}
+	// metadata, err := rs.GetLatestVersion(domain)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	// Get record from peer with latest version
 	key := makeRecordKey(domain)
@@ -616,16 +685,16 @@ func (rs *RecordStore) GetLatestRecord(domain string) (*Record, error) {
 		return nil, err
 	}
 
-	// Verify hash
-	content, ok := record.Mappings["content"].([]byte)
-	if !ok {
-		return nil, fmt.Errorf("record content not found")
-	}
-	hash := sha256.Sum256(content)
-	hashStr := hex.EncodeToString(hash[:])
-	if hashStr != metadata.Hash {
-		return nil, fmt.Errorf("record hash mismatch")
-	}
+	// // Verify hash
+	// content, ok := record.Mappings["content"].([]byte)
+	// if !ok {
+	// 	return nil, fmt.Errorf("record content not found")
+	// }
+	// hash := sha256.Sum256(content)
+	// hashStr := hex.EncodeToString(hash[:])
+	// if hashStr != metadata.Hash {
+	// 	return nil, fmt.Errorf("record hash mismatch")
+	// }
 
 	return record, nil
 }
@@ -646,65 +715,6 @@ func (s *RecordStore) GetVoteResult(domain string) (*VoteResult, error) {
 		return nil, fmt.Errorf("voting manager not initialized")
 	}
 	return s.votingManager.getVoteResult(domain)
-}
-
-// syncPendingRecords syncs pending records from DHT using the index
-func (s *RecordStore) syncPendingRecords() {
-	// Get the index of pending domains
-	domains, ok := s.GetPendingDomains()
-	if !ok {
-		s.log.WithField("domains", domains).Info("No pending record found")
-		return
-	}
-
-	// Get each pending record
-	for _, domain := range domains {
-		key := makePendingKey(domain)
-		data, err := s.dht.GetValue(s.ctx, key)
-		if err != nil {
-			if !errors.Is(err, routing.ErrNotFound) {
-				s.log.WithError(err).WithField("domain", domain).Error("Failed to get pending record")
-				if s.pendingRecords[domain] == nil {
-					continue
-				}
-				s.pendingMutex.Lock()
-				delete(s.pendingRecords, domain)
-				s.pendingMutex.Unlock()
-			}
-			continue
-		}
-		var pending PendingRecord
-		if err := json.Unmarshal(data, &pending); err != nil {
-			s.log.WithError(err).Error("Failed to unmarshal pending record")
-			continue
-		}
-
-		if pending.Record != nil {
-			// Add to local cache if not already present
-			s.pendingMutex.Lock()
-			if _, exists := s.pendingRecords[pending.Record.Domain]; !exists {
-				s.pendingRecords[pending.Record.Domain] = pending.Record
-			}
-			s.pendingMutex.Unlock()
-		}
-	}
-}
-
-// StartSync starts periodic sync of pending records
-func (s *RecordStore) StartSync(interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				s.syncPendingRecords()
-			case <-s.ctx.Done():
-				return
-			}
-		}
-	}()
 }
 
 // GetStoreVersion returns the current version of the store
@@ -862,8 +872,8 @@ func (s *RecordStore) ConfirmRecord(domain string) error {
 	fmt.Println("Found pending record")
 	record := pending.Record
 
-	// Acquire lock on the index
-	lockID, acquired := s.TryAcquireLock(indexKey)
+	// Acquire lock on the index with backoff
+	lockID, acquired := s.TryAcquireIndexLock()
 	if !acquired {
 		return fmt.Errorf("failed to acquire lock for pending index")
 	}
@@ -897,15 +907,10 @@ func (s *RecordStore) ConfirmRecord(domain string) error {
 	s.recordsMutex.Lock()
 	defer s.recordsMutex.Unlock()
 
-	data, err := record.Serialize()
+	// Store the confirmed record to datastore
+	err = s.SaveRecord(*record)
 	if err != nil {
-		return fmt.Errorf("failed to serialize record: %w", err)
-	}
-
-	// Store the confirmed record
-	key := datastore.NewKey(makeRecordKey(record.Domain))
-	if err := s.db.Put(context.Background(), key, data); err != nil {
-		return fmt.Errorf("failed to store record: %w", err)
+		return err
 	}
 
 	// Increment store version
@@ -921,11 +926,23 @@ func (s *RecordStore) ConfirmRecord(domain string) error {
 	_ = s.dht.PutValue(s.ctx, makePendingKey(domain), []byte{}) // Remove from DHT
 	s.ReleaseLock(domain, record.LockID)
 
-	// Remove from local pending records cache
-	s.pendingMutex.Lock()
-	delete(s.pendingRecords, domain)
-	s.pendingMutex.Unlock()
+	return nil
+}
 
+func (s *RecordStore) SaveRecord(record Record) error {
+
+	data, err := record.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize record: %w", err)
+	}
+	key := makeRecordKey(record.Domain)
+	if err := s.dht.PutValue(s.ctx, key, data); err != nil {
+		return fmt.Errorf("failed to store record to dht:  %w", err)
+	}
+	datastoreKey := datastore.NewKey(key)
+	if err := s.db.Put(context.Background(), datastoreKey, data); err != nil {
+		return fmt.Errorf("failed to store record: %w", err)
+	}
 	return nil
 }
 
@@ -937,8 +954,8 @@ func (s *RecordStore) RejectRecord(domain string) error {
 	}
 	record := pending.Record
 
-	// Acquire lock on the index
-	lockID, acquired := s.TryAcquireLock(indexKey)
+	// Acquire lock on the index with backoff
+	lockID, acquired := s.TryAcquireIndexLock()
 	if !acquired {
 		return fmt.Errorf("failed to acquire lock for pending index")
 	}
@@ -951,7 +968,6 @@ func (s *RecordStore) RejectRecord(domain string) error {
 	}
 
 	// Remove domain from index
-	domain = strings.ToLower(domain)
 	newDomains := make([]string, 0, len(domains))
 	for _, d := range domains {
 		if d != domain {
@@ -972,10 +988,54 @@ func (s *RecordStore) RejectRecord(domain string) error {
 	_ = s.dht.PutValue(s.ctx, makePendingKey(domain), []byte{}) // Remove from DHT
 	s.ReleaseLock(domain, record.LockID)
 
-	// Remove from local pending records cache
-	s.pendingMutex.Lock()
-	delete(s.pendingRecords, domain)
-	s.pendingMutex.Unlock()
-
 	return nil
+}
+
+// GetCurrentVersion returns the current version number
+func (s *RecordStore) GetCurrentVersion() int64 {
+	s.recordsMutex.RLock()
+	defer s.recordsMutex.RUnlock()
+	return s.version
+}
+
+// IncrementVersion increases the current version and returns the new value
+func (s *RecordStore) IncrementVersion() int64 {
+	s.recordsMutex.Lock()
+	defer s.recordsMutex.Unlock()
+	s.version++
+	return s.version
+}
+
+const lastSyncKey = "/sync/last_sync_time"
+
+// GetLastSyncTime returns the last sync time from the datastore
+func (s *RecordStore) GetLastSyncTime() (time.Time, error) {
+	s.recordsMutex.RLock()
+	defer s.recordsMutex.RUnlock()
+
+	data, err := s.db.Get(context.Background(), datastore.NewKey(lastSyncKey))
+	if err != nil {
+		if err == datastore.ErrNotFound {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+
+	var t time.Time
+	if err := t.UnmarshalBinary(data); err != nil {
+		return time.Time{}, err
+	}
+	return t, nil
+}
+
+// SetLastSyncTime stores the last sync time in the datastore
+func (s *RecordStore) SetLastSyncTime(t time.Time) error {
+	s.recordsMutex.Lock()
+	defer s.recordsMutex.Unlock()
+
+	data, err := t.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return s.db.Put(context.Background(), datastore.NewKey(lastSyncKey), data)
 }

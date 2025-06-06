@@ -129,12 +129,6 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 		}
 		fmt.Println("successfully unmarshalled", recordMsg.Version, n.Store.GetCurrentVersion())
 
-		// // skip if node is publisher
-		// if recordMsg.PeerID == n.getID() {
-		// 	fmt.Println("publisher skipping self-published record")
-		// 	continue
-		// }
-
 		// Check if we need this update based on version and state root
 		for _, record := range recordMsg.Records {
 			if existingRecord, err := n.Store.GetLatestRecord(record.Domain); err == nil {
