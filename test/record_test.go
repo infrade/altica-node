@@ -2,13 +2,23 @@ package test
 
 import (
 	"altica_node/core"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
+func generateTestKey(t *testing.T) *ecdsa.PrivateKey {
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("Failed to generate key: %v", err)
+	}
+	return privateKey
+}
+
 func TestNewRecord(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(nil)
+	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
 		Mappings: make(map[string]interface{}),
@@ -27,10 +37,20 @@ func TestNewRecord(t *testing.T) {
 	if r.Mappings == nil {
 		t.Error("Mappings should be initialized")
 	}
+
+	// Verify signer address is set correctly
+	signerAddr, err := r.GetSignerAddress()
+	if err != nil {
+		t.Fatalf("Failed to get signer address: %v", err)
+	}
+	expectedAddr := crypto.PubkeyToAddress(priv.PublicKey)
+	if signerAddr != expectedAddr {
+		t.Errorf("Signer address mismatch. Got %s, want %s", signerAddr.Hex(), expectedAddr.Hex())
+	}
 }
 
 func TestRecordSigningAndVerification(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(nil)
+	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
 		Mappings: map[string]interface{}{"A": "1.2.3.4"},
@@ -46,8 +66,8 @@ func TestRecordSigningAndVerification(t *testing.T) {
 }
 
 func TestInvalidSignatureFails(t *testing.T) {
-	_, priv1, _ := ed25519.GenerateKey(nil)
-	_, priv2, _ := ed25519.GenerateKey(nil)
+	priv1 := generateTestKey(t)
+	priv2 := generateTestKey(t)
 
 	r := &core.Record{
 		Domain:   "example.alt",
@@ -60,7 +80,7 @@ func TestInvalidSignatureFails(t *testing.T) {
 	}
 
 	// Manually override the public key with mismatched one
-	r.PublicKey = priv2.Public().(ed25519.PublicKey)
+	r.PublicKey = crypto.FromECDSAPub(&priv2.PublicKey)
 
 	if r.Verify() {
 		t.Error("Verification should have failed with mismatched public key")
@@ -68,14 +88,16 @@ func TestInvalidSignatureFails(t *testing.T) {
 }
 
 func TestSerializationAndDeserialization(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(nil)
+	priv := generateTestKey(t)
 	r1 := &core.Record{
 		Domain:   "example.alt",
 		Mappings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
-	r1.Sign(priv)
+	if err := r1.Sign(priv); err != nil {
+		t.Fatalf("Failed to sign record: %v", err)
+	}
 
 	data, err := r1.Serialize()
 	if err != nil {
@@ -89,6 +111,19 @@ func TestSerializationAndDeserialization(t *testing.T) {
 
 	if !r2.Verify() {
 		t.Error("Deserialized record failed to verify")
+	}
+
+	// Verify signer address is preserved after serialization
+	addr1, err := r1.GetSignerAddress()
+	if err != nil {
+		t.Fatalf("Failed to get signer address from r1: %v", err)
+	}
+	addr2, err := r2.GetSignerAddress()
+	if err != nil {
+		t.Fatalf("Failed to get signer address from r2: %v", err)
+	}
+	if addr1 != addr2 {
+		t.Errorf("Signer address mismatch after serialization. Got %s, want %s", addr2.Hex(), addr1.Hex())
 	}
 }
 
@@ -117,7 +152,7 @@ func TestExpiration(t *testing.T) {
 }
 
 func TestUpdateRecord(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(nil)
+	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
 		Mappings: map[string]interface{}{"A": "1.2.3.4"},
@@ -133,5 +168,38 @@ func TestUpdateRecord(t *testing.T) {
 	}
 	if !r.Verify() {
 		t.Error("Updated record signature failed to verify")
+	}
+}
+
+func TestGetSignerAddress(t *testing.T) {
+	priv := generateTestKey(t)
+	r := &core.Record{
+		Domain:   "example.alt",
+		Mappings: make(map[string]interface{}),
+		TTL:      time.Minute,
+		Metadata: map[string]interface{}{},
+	}
+	if err := r.Sign(priv); err != nil {
+		t.Fatalf("Failed to sign record: %v", err)
+	}
+
+	// Test getting address from public key
+	addr, err := r.GetSignerAddress()
+	if err != nil {
+		t.Fatalf("Failed to get signer address: %v", err)
+	}
+	expectedAddr := crypto.PubkeyToAddress(priv.PublicKey)
+	if addr != expectedAddr {
+		t.Errorf("Signer address mismatch. Got %s, want %s", addr.Hex(), expectedAddr.Hex())
+	}
+
+	// Test getting address from stored signer field
+	r.Signer = addr.Hex()
+	addr2, err := r.GetSignerAddress()
+	if err != nil {
+		t.Fatalf("Failed to get signer address: %v", err)
+	}
+	if addr2 != addr {
+		t.Errorf("Signer address mismatch. Got %s, want %s", addr2.Hex(), addr.Hex())
 	}
 }
