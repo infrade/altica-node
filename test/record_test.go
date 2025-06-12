@@ -194,7 +194,7 @@ func TestGetSignerAddress(t *testing.T) {
 	}
 
 	// Test getting address from stored signer field
-	r.Signer = addr.Hex()
+	r.Signer = addr
 	addr2, err := r.GetSignerAddress()
 	if err != nil {
 		t.Fatalf("Failed to get signer address: %v", err)

@@ -24,7 +24,7 @@ type Record struct {
 	Metadata  map[string]interface{}   `json:"metadata"`           // Additional metadata
 	Versions  map[string]RecordVersion `json:"versions,omitempty"` // peerID -> version
 	Latest    RecordVersion            `json:"latest,omitempty"`   // Latest version info
-	Signer    string                   `json:"signer"`             // EVM-like address of the signer
+	Signer    common.Address           `json:"signer"`             // EVM-like address of the signer
 }
 
 // RecordVersion represents a version of a record
@@ -49,6 +49,12 @@ func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte
 	// Initialize versioning
 	record.Versions = make(map[string]RecordVersion)
 	record.Metadata["created_at"] = time.Now().UTC().Format(time.RFC3339)
+	signer, err := record.GetSignerAddress()
+	if err != nil {
+		return nil, fmt.Errorf("Cannot get signer address")
+	}
+
+	record.Signer = signer
 
 	if !record.Verify() {
 		return nil, fmt.Errorf("Record verification failed")
@@ -77,7 +83,10 @@ func (r *Record) Sign(privateKey *ecdsa.PrivateKey) error {
 	r.PublicKey = crypto.FromECDSAPub(&privateKey.PublicKey)
 
 	// Set the signer address
-	r.Signer = crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
+	r.Signer, err = r.GetSignerAddress()
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -109,9 +118,6 @@ func (r *Record) Verify() bool {
 
 // GetSignerAddress returns the Ethereum address of the signer
 func (r *Record) GetSignerAddress() (common.Address, error) {
-	if r.Signer != "" {
-		return common.HexToAddress(r.Signer), nil
-	}
 
 	// If Signer is not set, derive it from the public key
 	pubKey, err := crypto.UnmarshalPubkey(r.PublicKey)
