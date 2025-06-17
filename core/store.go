@@ -351,11 +351,6 @@ func (s *RecordStore) Add(record *Record) error {
 	return nil
 }
 
-// DHT key for pending records
-func makePendingKey(domain string) string {
-	return fmt.Sprintf("/altica/pending/%s", strings.ToLower(domain))
-}
-
 // TryAcquireIndexLock attempts to acquire the index lock with exponential backoff
 func (s *RecordStore) TryAcquireIndexLock() (string, bool) {
 
@@ -663,9 +658,19 @@ func makeRecordKey(domain string) string {
 	return fmt.Sprintf("%s/%s", recordNamespace, domain)
 }
 
+// DHT key for pending records
+func makePendingKey(domain string) string {
+	return fmt.Sprintf("/altica/pending/%s", strings.ToLower(domain))
+}
+
 // makeMetadataKey creates a DHT key for record metadata
 func makeMetadataKey(domain string) string {
 	return fmt.Sprintf("%s/%s/metadata", recordNamespace, domain)
+}
+
+// makeNamehashKey creates a DHT key for namehash mappings
+func makeNamehashKey(namehash []byte) string {
+	return fmt.Sprintf("%s/namehash/%x", recordNamespace, namehash)
 }
 
 // GetVoteResult retrieves vote result for a domain
@@ -883,21 +888,51 @@ func (s *RecordStore) ConfirmRecord(domain string) error {
 	return nil
 }
 
+// SaveRecord saves a record to both DHT and local storage
 func (s *RecordStore) SaveRecord(record Record) error {
-
+	// Save the record
 	data, err := record.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize record: %w", err)
 	}
 	key := makeRecordKey(record.Domain)
 	if err := s.dht.PutValue(s.ctx, key, data); err != nil {
-		return fmt.Errorf("failed to store record to dht:  %w", err)
+		return fmt.Errorf("failed to store record to dht: %w", err)
 	}
 	datastoreKey := datastore.NewKey(key)
 	if err := s.db.Put(context.Background(), datastoreKey, data); err != nil {
 		return fmt.Errorf("failed to store record: %w", err)
 	}
+
+	// Save namehash mapping
+	namehash := Namehash(record.Domain)
+	namehashKey := makeNamehashKey(namehash)
+	if err := s.dht.PutValue(s.ctx, namehashKey, []byte(record.Domain)); err != nil {
+		return fmt.Errorf("failed to store namehash mapping to dht: %w", err)
+	}
+	if err := s.db.Put(context.Background(), datastore.NewKey(namehashKey), []byte(record.Domain)); err != nil {
+		return fmt.Errorf("failed to store namehash mapping: %w", err)
+	}
+
 	return nil
+}
+
+// GetByNamehash looks up a domain name by its namehash
+func (s *RecordStore) GetByNamehash(namehash []byte) (*Record, bool) {
+	// First try local storage
+	namehashKey := makeNamehashKey(namehash)
+	domain, err := s.db.Get(context.Background(), datastore.NewKey(namehashKey))
+	if err == nil && domain != nil {
+		return s.Get(string(domain))
+	}
+
+	// If not found locally, try DHT
+	domain, err = s.dht.GetValue(s.ctx, namehashKey)
+	if err == nil && domain != nil {
+		return s.Get(string(domain))
+	}
+
+	return nil, false
 }
 
 // RejectRecord cancels a pending record registration and updates the index

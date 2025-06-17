@@ -1,3 +1,9 @@
 .altica
 altica_node
+altica_binding
 __*
+*.pk*
+.env*
+.deps
+bin
+artifacts

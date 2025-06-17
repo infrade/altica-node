@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -14,6 +17,7 @@ import (
 // Record represents a robust, extensible DNS record that can support multi-chain, multi-use-case mappings.
 type Record struct {
 	Domain    string                   `json:"domain"`
+	Namehash  []byte                   `json:"namehash"`
 	Mappings  map[string]interface{}   `json:"mappings"`           // Flexible mapping structure
 	TTL       time.Duration            `json:"ttl"`                // Time-to-live for the record
 	Signature []byte                   `json:"signature"`          // ECDSA signature
@@ -37,8 +41,10 @@ type RecordVersion struct {
 
 // NewRecord creates a new unsigned record
 func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte) (*Record, error) {
+
 	record := &Record{
 		Domain:    domain,
+		Namehash:  Namehash(domain),
 		Mappings:  make(map[string]interface{}),
 		TTL:       ttl,
 		Signature: signature,
@@ -177,26 +183,29 @@ func (r *Record) serializeForSigning() ([]byte, error) {
 	return json.Marshal(unsigned)
 }
 
-// MarshalJSON customizes JSON output for Record to encode Signature and PublicKey as hex strings
+// MarshalJSON customizes JSON output for Record to encode Signature, PublicKey, and Namehash as hex strings
 func (r *Record) MarshalJSON() ([]byte, error) {
 	type Alias Record
 	return json.Marshal(&struct {
 		Signature string `json:"signature,omitempty"`
 		PublicKey string `json:"public_key,omitempty"`
+		Namehash  string `json:"namehash,omitempty"`
 		*Alias
 	}{
 		Signature: hex.EncodeToString(r.Signature),
 		PublicKey: hex.EncodeToString(r.PublicKey),
+		Namehash:  hex.EncodeToString(r.Namehash),
 		Alias:     (*Alias)(r),
 	})
 }
 
-// UnmarshalJSON customizes JSON input for Record to decode Signature and PublicKey from hex strings
+// UnmarshalJSON customizes JSON input for Record to decode Signature, PublicKey, and Namehash from hex strings
 func (r *Record) UnmarshalJSON(data []byte) error {
 	type Alias Record
 	temp := &struct {
 		Signature string `json:"signature,omitempty"`
 		PublicKey string `json:"public_key,omitempty"`
+		Namehash  string `json:"namehash,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -218,5 +227,105 @@ func (r *Record) UnmarshalJSON(data []byte) error {
 		}
 		r.PublicKey = b
 	}
+	if temp.Namehash != "" {
+		b, err := hex.DecodeString(temp.Namehash)
+		if err != nil {
+			return err
+		}
+		r.Namehash = b
+	}
 	return nil
+}
+
+// Helper to create ABI types
+func mustABIType(t string) abi.Type {
+	typ, err := abi.NewType(t, "", nil)
+	if err != nil {
+		panic(err)
+	}
+	return typ
+}
+
+// GenerateBindingSignature generates a signature for submitting a binding to the AlticaRegistry contract
+func (r *Record) GenerateBindingSignature(privateKey *ecdsa.PrivateKey, resolver common.Address, expiresAt uint64, timestamp uint64) ([]byte, error) {
+	typeHashSlice := keccak256([]byte("SubmitBinding(bytes32 namehash,address resolver,uint64 expiresAt,uint64 timestamp)"))
+	var typeHash [32]byte
+	copy(typeHash[:], typeHashSlice)
+
+	var namehash [32]byte
+	copy(namehash[:], r.Namehash)
+
+	structArgs := abi.Arguments{
+		{Type: mustABIType("bytes32")},
+		{Type: mustABIType("bytes32")},
+		{Type: mustABIType("address")},
+		{Type: mustABIType("uint256")},
+		{Type: mustABIType("uint256")},
+	}
+	structPacked, err := structArgs.Pack(
+		typeHash,
+		namehash,
+		resolver,
+		big.NewInt(int64(expiresAt)),
+		big.NewInt(int64(timestamp)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("abi.Pack struct: %w", err)
+	}
+	structHash := keccak256(structPacked)
+
+	// Domain separator
+	domainTypeHashSlice := keccak256([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
+	var domainTypeHash [32]byte
+	copy(domainTypeHash[:], domainTypeHashSlice)
+
+	nameHashSlice := keccak256([]byte("AlticaRegistry")) // empty string
+	var nameHash [32]byte
+	copy(nameHash[:], nameHashSlice)
+
+	versionHashSlice := keccak256([]byte("0")) // empty string
+	var versionHash [32]byte
+	copy(versionHash[:], versionHashSlice)
+
+	chainId := big.NewInt(31337)
+	contractAddr := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+
+	domainArgs := abi.Arguments{
+		{Type: mustABIType("bytes32")},
+		{Type: mustABIType("bytes32")},
+		{Type: mustABIType("bytes32")},
+		{Type: mustABIType("uint256")},
+		{Type: mustABIType("address")},
+	}
+	domainPacked, err := domainArgs.Pack(
+		domainTypeHash,
+		nameHash,
+		versionHash,
+		chainId,
+		contractAddr,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("abi.Pack domain: %w", err)
+	}
+	domainSeparator := keccak256(domainPacked)
+
+	// Digest
+	digestBytes := []byte{0x19, 0x01}
+	digestBytes = append(digestBytes, domainSeparator...)
+	digestBytes = append(digestBytes, structHash...)
+	digest := keccak256(digestBytes)
+	fmt.Printf("DomainSeparator: 0x%x\n", domainSeparator)
+	fmt.Printf("Digest: 0x%x\n", digest)
+	fmt.Printf("StructHash: 0x%x\n", structHash)
+
+	// Sign
+	signature, err := crypto.Sign(digest, privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign binding: %w", err)
+	}
+	// Fix v value for EVM
+	if signature[64] < 27 {
+		signature[64] += 27
+	}
+	return signature, nil
 }

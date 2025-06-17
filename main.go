@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"altica_node/contracts/evm"
 	"altica_node/core"
 	"altica_node/rpc"
 
@@ -97,6 +98,19 @@ func main() {
 
 	fmt.Println("Altica P2P node is running with ID:", node.Host.ID())
 	fmt.Printf("RPC server listening on :%d\n", *port)
+
+	// Start EVM contract event listener
+	evmListener, err := evm.NewEventListener(node.Store)
+	if err != nil {
+		fmt.Printf("Cannot start EVM Listener, %s", err)
+		os.Exit(1)
+	}
+
+	err = evmListener.Start(ctx)
+	if err != nil {
+		fmt.Printf("Failed to start EVM Listener, %s", err)
+		os.Exit(1)
+	}
 
 	// After node setup and bootstrap
 	go func() {
