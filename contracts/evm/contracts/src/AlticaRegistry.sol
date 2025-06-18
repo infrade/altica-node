@@ -101,10 +101,10 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
             return address(0);
         }
         Binding memory b = bindings[namehash];
-        if (b.expiresAt < block.timestamp) {
-            return address(0);
+        if (b.status == Status.active || b.expiresAt > block.timestamp){
+            return b.resolver;
         }
-        return b.resolver;
+        return address(0);
     }
 
     function oracleUnbind(bytes32 namehash) external onlyOwner {

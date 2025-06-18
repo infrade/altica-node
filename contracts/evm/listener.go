@@ -71,9 +71,9 @@ func NewEventListener(store *core.RecordStore) (*EventListener, error) {
 	}
 
 	// Get contract address from environment
-	contractAddr := os.Getenv("EVM_CONTRACT_ADDRESS")
+	contractAddr := os.Getenv("EVM_ALTICA_REGISTRY_ADDRESS")
 	if contractAddr == "" {
-		return nil, fmt.Errorf("EVM_CONTRACT_ADDRESS environment variable is required")
+		return nil, fmt.Errorf("EVM_ALTICA_REGISTRY_ADDRESS environment variable is required")
 	}
 
 	// Get deployment block from environment
@@ -206,9 +206,9 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 	}
 
 	l.log.WithFields(logrus.Fields{
-		"domain":  record.Domain,
-		"tx_hash": tx.Hash().Hex(),
-		"acceptd": accepted,
+		"domain":   record.Domain,
+		"tx_hash":  tx.Hash().Hex(),
+		"accepted": accepted,
 	}).Info("Called oracleDecideSigner")
 
 	return nil

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"math/big"
@@ -287,8 +288,21 @@ func (r *Record) GenerateBindingSignature(privateKey *ecdsa.PrivateKey, resolver
 	var versionHash [32]byte
 	copy(versionHash[:], versionHashSlice)
 
-	chainId := big.NewInt(31337)
-	contractAddr := common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	chainID := os.Getenv("EVM_CHAIN_ID")
+	if chainID == "" {
+		return nil, fmt.Errorf("EVM_CHAIN_ID environment variable is required")
+	}
+	// Get contract address from environment
+	_contractAddr := os.Getenv("EVM_ALTICA_REGISTRY_ADDRESS")
+	if _contractAddr == "" {
+		return nil, fmt.Errorf("EVM_ALTICA_REGISTRY_ADDRESS environment variable is required")
+	}
+
+	chainId, ok := new(big.Int).SetString(chainID, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid chain ID: %s", chainID)
+	}
+	contractAddr := common.HexToAddress(_contractAddr)
 
 	domainArgs := abi.Arguments{
 		{Type: mustABIType("bytes32")},
