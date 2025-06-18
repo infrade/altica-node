@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/sirupsen/logrus"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // EventListener listens for events from the AlticaRegistry contract
@@ -116,14 +117,44 @@ func NewEventListener(store *core.RecordStore) (*EventListener, error) {
 
 // Start begins listening for events
 func (l *EventListener) Start(ctx context.Context) error {
-	// Create event filter
+	// Get the latest block number
+	latestBlock, err := l.client.BlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get latest block: %w", err)
+	}
+
+	// Get last synced block from DB
+	lastSyncedBlock, err := l.getLastSyncedBlock()
+	if err != nil {
+		return fmt.Errorf("failed to get last synced block: %w", err)
+	}
 	query := ethereum.FilterQuery{
 		Addresses: []common.Address{l.contractAddr},
-		FromBlock: big.NewInt(int64(l.fromBlock)),
+		FromBlock: big.NewInt(int64(lastSyncedBlock)),
+		ToBlock:   big.NewInt(int64(latestBlock)),
 		Topics: [][]common.Hash{
 			{crypto.Keccak256Hash([]byte("SubmittedBinding(bytes32,address,uint64)"))},
 		},
 	}
+
+	if lastSyncedBlock < latestBlock {
+		historyLogs, err := l.client.FilterLogs(ctx, query)
+		if err != nil {
+			l.log.WithError(err).Error("Failed to filter historical logs")
+		}
+		for _, log := range historyLogs {
+			if err := l.handleSubmittedBinding(log); err != nil {
+				l.log.WithError(err).Error("Failed to handle historical SubmittedBinding event")
+			}
+			// Persist the block number after each log
+			l.setLastSyncedBlock(uint64(log.BlockNumber))
+		}
+		l.setLastSyncedBlock(latestBlock)
+	}
+
+	// Now subscribe to new logs from the latest block onward
+	query.FromBlock = big.NewInt(int64(latestBlock))
+	query.ToBlock = nil
 
 	logs := make(chan types.Log)
 	sub, err := l.client.SubscribeFilterLogs(ctx, query, logs)
@@ -136,7 +167,6 @@ func (l *EventListener) Start(ctx context.Context) error {
 			select {
 			case err := <-sub.Err():
 				l.log.WithError(err).Error("Subscription error")
-				// Attempt to resubscribe
 				time.Sleep(5 * time.Second)
 				sub, err = l.client.SubscribeFilterLogs(ctx, query, logs)
 				if err != nil {
@@ -243,4 +273,34 @@ func (l *EventListener) getTransactOpts() (*bind.TransactOpts, error) {
 	auth.GasLimit = 300000 // Adjust based on your needs
 
 	return auth, nil
+}
+
+func (l *EventListener) getLastSyncedBlock() (uint64, error) {
+	db, err := leveldb.OpenFile(getEVMListenerDBPath(), nil)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	val, err := db.Get([]byte("last_synced_block"), nil)
+	if err != nil {
+		return l.fromBlock, nil // fallback to fromBlock if not found
+	}
+	block, err := strconv.ParseUint(string(val), 10, 64)
+	if err != nil {
+		return l.fromBlock, nil
+	}
+	return block, nil
+}
+
+func (l *EventListener) setLastSyncedBlock(block uint64) error {
+	db, err := leveldb.OpenFile(getEVMListenerDBPath(), nil)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.Put([]byte("last_synced_block"), []byte(strconv.FormatUint(block, 10)), nil)
+}
+
+func getEVMListenerDBPath() string {
+	return filepath.Join(core.GetDataDir(), "evm_listener")
 }

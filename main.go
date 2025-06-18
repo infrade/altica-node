@@ -24,15 +24,7 @@ func main() {
 	flag.Parse()
 
 	ctx := context.Background()
-
-	// Setup data directory
-	dataDir := filepath.Join(".", ".altica")
-
-	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		fmt.Println("Error creating data directory:", err)
-		os.Exit(1)
-	}
+	dataDir := core.GetDataDir()
 
 	// Load or generate private key
 	privKeyFile := filepath.Join(dataDir, "node.key")
@@ -101,6 +93,7 @@ func main() {
 
 	startListener := os.Getenv("EVM_ENABLE_SMART_CONTRACT_LISTENER")
 	if startListener == "true" {
+		fmt.Println("Starting EVM Listener")
 		// Start EVM contract event listener
 		evmListener, err := evm.NewEventListener(node.Store)
 		if err != nil {
@@ -113,6 +106,8 @@ func main() {
 			fmt.Printf("Failed to start EVM Listener, %s", err)
 			os.Exit(1)
 		}
+	} else {
+		fmt.Println("Skipping EVM Listener")
 	}
 
 	// After node setup and bootstrap
