@@ -59,7 +59,7 @@ func TestDomainRegistration(t *testing.T) {
 	// Create and register a record
 	record := &core.Record{
 		Domain:   "test.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Hour,
 		Metadata: map[string]interface{}{},
 	}
@@ -93,7 +93,7 @@ func TestVoting(t *testing.T) {
 	// Create and register a record
 	record := &core.Record{
 		Domain:   "vote.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Hour,
 		Metadata: map[string]interface{}{},
 	}
@@ -123,7 +123,7 @@ func TestRecordConfirmation(t *testing.T) {
 	// Create and register a record
 	record := &core.Record{
 		Domain:   "confirm.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Hour,
 		Metadata: map[string]interface{}{},
 	}
@@ -157,7 +157,7 @@ func TestRecordRejection(t *testing.T) {
 	// Create and register a record
 	record := &core.Record{
 		Domain:   "reject.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Hour,
 		Metadata: map[string]interface{}{},
 	}

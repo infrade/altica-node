@@ -46,14 +46,14 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
     /// @param resolver Address to resolve this name    
     /// @param expiresAt Unix timestamp when this binding should expire
     /// @param timestamp Time when the message was signed
-    /// @param sig Signature by resolver authorizing the binding
+    /// @param sig Signature by signer authorizing the binding
     function SubmitBinding(
         bytes32 namehash,
         address resolver,
         uint64 expiresAt,
         uint64 timestamp,
         bytes calldata sig
-    ) external {
+    ) external payable {
         require(block.timestamp <= timestamp + MAX_TIME_DRIFT, "Stale signature");
 
         Binding memory current = bindings[namehash];
@@ -84,12 +84,14 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
        return _domainSeparatorV4();
     }
 
-    function finalizeBinding(bytes32 namehash) external onlyOwner {
-        Binding storage b = bindings[namehash];
+    function finalizeBinding(bytes32 namehash) external {
         address signer = bindingSigner[namehash];
-
         require(signer != address(0), "Signer not broadcasted");
-        require(signer == bindingSigner[namehash], "Invalid signature");
+
+        Binding storage b = bindings[namehash];
+        require(b.status == Status.pending, "Binding Finalized");
+        require(b.expiresAt > block.timestamp, "Binding Expired");
+        require(b.signer == signer, "Invalid signature");
         b.status = Status.active;
 
         emit NameBound(namehash, b.resolver, b.expiresAt);
@@ -123,5 +125,9 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
         require(bindingSigner[namehash] == address(0), "Signer exists for binding");
         bindingSigner[namehash] = signer;
         emit SignerBound(namehash, signer);
+    }
+
+    function withdraw() external onlyOwner {
+        payable(owner()).transfer(address(this).balance);
     }
 }

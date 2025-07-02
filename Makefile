@@ -2,7 +2,7 @@ APP_NAME=altica_node
 PKG=./...
 GO=go
 
-.PHONY: all build run test fmt lint clean mod-tidy binding install-binding
+.PHONY: all build run test fmt lint clean mod-tidy cli install-cli
 
 all: build
 
@@ -27,8 +27,8 @@ clean:
 mod-tidy:
 	$(GO) mod tidy
 
-binding:
-	$(GO) build -o altica_binding ./cmd/binding
+cli:
+	$(GO) build -o altica_cli ./cmd
 
-install-binding: binding
-	mv altica_binding /usr/local/bin/altica-binding
+install-cli: cli
+	mv altica_cli /usr/locl/bin/altica-cli

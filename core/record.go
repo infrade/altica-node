@@ -5,21 +5,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
-	"math/big"
-
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// Record represents a robust, extensible DNS record that can support multi-chain, multi-use-case mappings.
+// Record represents a robust, extensible DNS record that can support multi-chain, multi-use-case bindings.
 type Record struct {
 	Domain    string                   `json:"domain"`
 	Namehash  []byte                   `json:"namehash"`
-	Mappings  map[string]interface{}   `json:"mappings"`           // Flexible mapping structure
+	Bindings  Binding                  `json:"bindings"`           // Flexible mapping structure
 	TTL       time.Duration            `json:"ttl"`                // Time-to-live for the record
 	Signature []byte                   `json:"signature"`          // ECDSA signature
 	PublicKey []byte                   `json:"public_key"`         // secp256k1 public key
@@ -30,6 +26,7 @@ type Record struct {
 	Versions  map[string]RecordVersion `json:"versions,omitempty"` // peerID -> version
 	Latest    RecordVersion            `json:"latest,omitempty"`   // Latest version info
 	Signer    common.Address           `json:"signer"`             // EVM-like address of the signer
+	SignedTx  []byte                   `json:"signedTx"`           //Signed tx, needs to be valid for initial binding
 }
 
 // RecordVersion represents a version of a record
@@ -46,7 +43,7 @@ func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte
 	record := &Record{
 		Domain:    domain,
 		Namehash:  Namehash(domain),
-		Mappings:  make(map[string]interface{}),
+		Bindings:  Binding{},
 		TTL:       ttl,
 		Signature: signature,
 		PublicKey: pubKey,
@@ -236,110 +233,4 @@ func (r *Record) UnmarshalJSON(data []byte) error {
 		r.Namehash = b
 	}
 	return nil
-}
-
-// Helper to create ABI types
-func mustABIType(t string) abi.Type {
-	typ, err := abi.NewType(t, "", nil)
-	if err != nil {
-		panic(err)
-	}
-	return typ
-}
-
-// GenerateBindingSignature generates a signature for submitting a binding to the AlticaRegistry contract
-func (r *Record) GenerateBindingSignature(privateKey *ecdsa.PrivateKey, resolver common.Address, expiresAt uint64, timestamp uint64) ([]byte, error) {
-	typeHashSlice := keccak256([]byte("SubmitBinding(bytes32 namehash,address resolver,uint64 expiresAt,uint64 timestamp)"))
-	var typeHash [32]byte
-	copy(typeHash[:], typeHashSlice)
-
-	var namehash [32]byte
-	copy(namehash[:], r.Namehash)
-
-	structArgs := abi.Arguments{
-		{Type: mustABIType("bytes32")},
-		{Type: mustABIType("bytes32")},
-		{Type: mustABIType("address")},
-		{Type: mustABIType("uint256")},
-		{Type: mustABIType("uint256")},
-	}
-	structPacked, err := structArgs.Pack(
-		typeHash,
-		namehash,
-		resolver,
-		big.NewInt(int64(expiresAt)),
-		big.NewInt(int64(timestamp)),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("abi.Pack struct: %w", err)
-	}
-	structHash := keccak256(structPacked)
-
-	// Domain separator
-	domainTypeHashSlice := keccak256([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
-	var domainTypeHash [32]byte
-	copy(domainTypeHash[:], domainTypeHashSlice)
-
-	nameHashSlice := keccak256([]byte("AlticaRegistry")) // empty string
-	var nameHash [32]byte
-	copy(nameHash[:], nameHashSlice)
-
-	versionHashSlice := keccak256([]byte("0")) // empty string
-	var versionHash [32]byte
-	copy(versionHash[:], versionHashSlice)
-
-	chainID := os.Getenv("EVM_CHAIN_ID")
-	if chainID == "" {
-		return nil, fmt.Errorf("EVM_CHAIN_ID environment variable is required")
-	}
-	// Get contract address from environment
-	_contractAddr := os.Getenv("EVM_ALTICA_REGISTRY_ADDRESS")
-	if _contractAddr == "" {
-		return nil, fmt.Errorf("EVM_ALTICA_REGISTRY_ADDRESS environment variable is required")
-	}
-
-	chainId, ok := new(big.Int).SetString(chainID, 10)
-	if !ok {
-		return nil, fmt.Errorf("invalid chain ID: %s", chainID)
-	}
-	contractAddr := common.HexToAddress(_contractAddr)
-
-	domainArgs := abi.Arguments{
-		{Type: mustABIType("bytes32")},
-		{Type: mustABIType("bytes32")},
-		{Type: mustABIType("bytes32")},
-		{Type: mustABIType("uint256")},
-		{Type: mustABIType("address")},
-	}
-	domainPacked, err := domainArgs.Pack(
-		domainTypeHash,
-		nameHash,
-		versionHash,
-		chainId,
-		contractAddr,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("abi.Pack domain: %w", err)
-	}
-	domainSeparator := keccak256(domainPacked)
-
-	// Digest
-	digestBytes := []byte{0x19, 0x01}
-	digestBytes = append(digestBytes, domainSeparator...)
-	digestBytes = append(digestBytes, structHash...)
-	digest := keccak256(digestBytes)
-	fmt.Printf("DomainSeparator: 0x%x\n", domainSeparator)
-	fmt.Printf("Digest: 0x%x\n", digest)
-	fmt.Printf("StructHash: 0x%x\n", structHash)
-
-	// Sign
-	signature, err := crypto.Sign(digest, privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign binding: %w", err)
-	}
-	// Fix v value for EVM
-	if signature[64] < 27 {
-		signature[64] += 27
-	}
-	return signature, nil
 }

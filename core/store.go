@@ -520,15 +520,15 @@ func (rs *RecordStore) UpdateRecord(domain string, content []byte) error {
 	if record == nil {
 		record = &Record{
 			Domain:   domain,
-			Mappings: make(map[string]interface{}),
+			Bindings: Binding{},
 			TTL:      time.Hour * 24, // Default TTL
 			Metadata: make(map[string]interface{}),
 			Versions: make(map[string]RecordVersion),
 		}
 	}
 
-	// Update content in mappings
-	record.Mappings["content"] = content
+	// Update content in bindings
+	// record.Bindings["content"] = content
 	record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 
 	// Update version
@@ -640,7 +640,7 @@ func (rs *RecordStore) GetLatestRecord(domain string) (*Record, error) {
 	}
 
 	// // Verify hash
-	// content, ok := record.Mappings["content"].([]byte)
+	// content, ok := record.Bindings["content"].([]byte)
 	// if !ok {
 	// 	return nil, fmt.Errorf("record content not found")
 	// }
@@ -668,7 +668,7 @@ func makeMetadataKey(domain string) string {
 	return fmt.Sprintf("%s/%s/metadata", recordNamespace, domain)
 }
 
-// makeNamehashKey creates a DHT key for namehash mappings
+// makeNamehashKey creates a DHT key for namehash bindings
 func makeNamehashKey(namehash []byte) string {
 	return fmt.Sprintf("%s/namehash/%x", recordNamespace, namehash)
 }

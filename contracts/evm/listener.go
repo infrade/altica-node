@@ -35,11 +35,12 @@ type EventListener struct {
 }
 
 // loadABI loads the ABI from the contracts output folder
-func loadABI() (string, error) {
+func LoadABI() abi.ABI {
 	// Get the directory of the current file
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
-		return "", fmt.Errorf("failed to get current file path")
+		fmt.Printf("failed to get current file path")
+		panic(1)
 	}
 	currentDir := filepath.Dir(currentFile)
 
@@ -49,7 +50,8 @@ func loadABI() (string, error) {
 	// Read the ABI file
 	data, err := os.ReadFile(abiPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read ABI file: %w", err)
+		fmt.Printf("failed to read ABI file: %v", err)
+		panic(1)
 	}
 
 	// Parse the JSON to get the ABI
@@ -57,10 +59,17 @@ func loadABI() (string, error) {
 		ABI json.RawMessage `json:"abi"`
 	}
 	if err := json.Unmarshal(data, &contractData); err != nil {
-		return "", fmt.Errorf("failed to parse ABI JSON: %w", err)
+		fmt.Printf("failed to parse ABI JSON: %v", err)
+		panic(1)
 	}
 
-	return string(contractData.ABI), nil
+	parsed, err := abi.JSON(strings.NewReader(string(contractData.ABI)))
+	if err != nil {
+		fmt.Printf("failed to parse ABI: %v", err)
+		panic(1)
+	}
+	return parsed
+
 }
 
 // NewEventListener creates a new event listener
@@ -93,17 +102,9 @@ func NewEventListener(store *core.RecordStore) (*EventListener, error) {
 	}
 
 	// Load the ABI from file
-	abiStr, err := loadABI()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load ABI: %w", err)
-	}
+	contract_abi := LoadABI()
 
-	parsed, err := abi.JSON(strings.NewReader(abiStr))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse ABI: %w", err)
-	}
-
-	contract := bind.NewBoundContract(common.HexToAddress(contractAddr), parsed, client, client, client)
+	contract := bind.NewBoundContract(common.HexToAddress(contractAddr), contract_abi, client, client, client)
 
 	return &EventListener{
 		client:       client,
@@ -213,7 +214,7 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 	}
 	var accepted bool
 	// Verify the signer matches
-	if strings.ToLower(recordSigner.Hex()) != strings.ToLower(event.Signer.Hex()) {
+	if !strings.EqualFold(recordSigner.Hex(), event.Signer.Hex()) {
 		l.log.WithFields(logrus.Fields{
 			"domain":       record.Domain,
 			"dht_signer":   recordSigner.Hex(),
@@ -230,6 +231,7 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 		return fmt.Errorf("failed to get transaction options: %w", err)
 	}
 
+	// TODO: check if correct signer exists on-chain already, and skip if it does.
 	tx, err := l.contract.Transact(auth, "oracleDecideSigner", event.Namehash, event.Signer, accepted)
 	if err != nil {
 		return fmt.Errorf("failed to call oracleDecideSigner: %w", err)

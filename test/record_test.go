@@ -21,7 +21,7 @@ func TestNewRecord(t *testing.T) {
 	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
-		Mappings: make(map[string]interface{}),
+		Bindings: make(map[string]interface{}),
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
@@ -34,8 +34,8 @@ func TestNewRecord(t *testing.T) {
 	if r.Domain != "example.alt" || r.TTL != time.Minute {
 		t.Error("Record did not set fields correctly")
 	}
-	if r.Mappings == nil {
-		t.Error("Mappings should be initialized")
+	if r.Bindings == nil {
+		t.Error("Bindings should be initialized")
 	}
 
 	// Verify signer address is set correctly
@@ -53,7 +53,7 @@ func TestRecordSigningAndVerification(t *testing.T) {
 	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
@@ -71,7 +71,7 @@ func TestInvalidSignatureFails(t *testing.T) {
 
 	r := &core.Record{
 		Domain:   "example.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
@@ -91,7 +91,7 @@ func TestSerializationAndDeserialization(t *testing.T) {
 	priv := generateTestKey(t)
 	r1 := &core.Record{
 		Domain:   "example.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
@@ -130,7 +130,7 @@ func TestSerializationAndDeserialization(t *testing.T) {
 func TestExpiration(t *testing.T) {
 	r := &core.Record{
 		Domain:   "expired.alt",
-		Mappings: make(map[string]interface{}),
+		Bindings: make(map[string]interface{}),
 		TTL:      -1 * time.Second,
 		Metadata: map[string]interface{}{},
 	}
@@ -141,7 +141,7 @@ func TestExpiration(t *testing.T) {
 
 	r2 := &core.Record{
 		Domain:   "valid.alt",
-		Mappings: make(map[string]interface{}),
+		Bindings: make(map[string]interface{}),
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
@@ -155,14 +155,14 @@ func TestUpdateRecord(t *testing.T) {
 	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
-		Mappings: map[string]interface{}{"A": "1.2.3.4"},
+		Bindings: map[string]interface{}{"A": "1.2.3.4"},
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}
 	if err := r.Sign(priv); err != nil {
 		t.Fatalf("Failed to sign record: %v", err)
 	}
-	r.Mappings["A"] = "0.9.8.7"
+	r.Bindings["A"] = "0.9.8.7"
 	if err := r.Sign(priv); err != nil {
 		t.Fatalf("Failed to re-sign record: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestGetSignerAddress(t *testing.T) {
 	priv := generateTestKey(t)
 	r := &core.Record{
 		Domain:   "example.alt",
-		Mappings: make(map[string]interface{}),
+		Bindings: make(map[string]interface{}),
 		TTL:      time.Minute,
 		Metadata: map[string]interface{}{},
 	}

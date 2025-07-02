@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"altica_node/contracts/evm"
 	"altica_node/core"
 
 	"github.com/libp2p/go-libp2p/core/routing"
@@ -19,6 +20,7 @@ type DomainRegisterParams struct {
 	TTL       time.Duration `json:"ttl"`
 	Signature string        `json:"signature"`
 	PublicKey string        `json:"publicKey"`
+	SignedTx  string        `json:"signedTx"`
 }
 
 type DomainGetParams struct {
@@ -31,7 +33,7 @@ type DomainStatusParams struct {
 
 type RecordAddParams struct {
 	Domain  string                 `json:"domain"`
-	Chain   string                 `json:"chain"`
+	Chain   int                    `json:"chain"`
 	Address string                 `json:"address"`
 	Proof   map[string]interface{} `json:"proof"` // e.g., {"challenge":..., "signature":...}
 }
@@ -53,6 +55,13 @@ func (p *DomainRegisterParams) Validate() error {
 	// if p.TTL <= 0 {
 	// 	return fmt.Errorf("ttl must be greater than zero")
 	// }
+	tx, err := evm.DecodeType2Tx(p.SignedTx)
+	if err != nil {
+		return fmt.Errorf("Invalid signedTx, %v", err)
+	}
+	if !tx.Validate() {
+		return fmt.Errorf("signedTx validation failed")
+	}
 	return nil
 }
 
@@ -130,18 +139,18 @@ func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error)
 
 	// Validate proof for the chain
 	if !validateProof(p.Chain, p.Address, p.Proof) {
-		return nil, fmt.Errorf("invalid proof for address on chain %s", p.Chain)
+		return nil, fmt.Errorf("invalid proof for address on chain %d", p.Chain)
 	}
 
-	// Update mappings and metadata
-	record.Mappings[p.Chain] = p.Address
+	// Update bindings and metadata
+	record.Bindings.Addresses[p.Chain] = p.Address
 	if record.Metadata == nil {
 		record.Metadata = make(map[string]interface{})
 	}
 	if record.Metadata["proofs"] == nil {
 		record.Metadata["proofs"] = map[string]interface{}{}
 	}
-	proofs := record.Metadata["proofs"].(map[string]interface{})
+	proofs := record.Metadata["proofs"].(map[int]interface{})
 	proofs[p.Chain] = p.Proof
 	record.Metadata["proofs"] = proofs
 	record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
@@ -156,7 +165,7 @@ func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error)
 	return record, nil
 }
 
-func validateProof(chain, address string, proof map[string]interface{}) bool {
+func validateProof(chain int, address string, proof map[string]interface{}) bool {
 	// TODO: Implement chain-specific proof validation
 	return true
 }
