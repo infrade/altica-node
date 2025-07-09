@@ -19,8 +19,8 @@ type DomainRegisterParams struct {
 	Domain    string        `json:"domain"`
 	TTL       time.Duration `json:"ttl"`
 	Signature string        `json:"signature"`
-	PublicKey string        `json:"publicKey"`
-	SignedTx  string        `json:"signedTx"`
+	PublicKey string        `json:"public_key"`
+	SignedTx  string        `json:"signed_tx"`
 }
 
 type DomainGetParams struct {
@@ -55,12 +55,8 @@ func (p *DomainRegisterParams) Validate() error {
 	// if p.TTL <= 0 {
 	// 	return fmt.Errorf("ttl must be greater than zero")
 	// }
-	tx, err := evm.DecodeType2Tx(p.SignedTx)
-	if err != nil {
-		return fmt.Errorf("Invalid signedTx, %v", err)
-	}
-	if !tx.Validate() {
-		return fmt.Errorf("signedTx validation failed")
+	if p.SignedTx == "" {
+		return fmt.Errorf("missing SignedTx")
 	}
 	return nil
 }
@@ -112,14 +108,30 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 
 	sigBytes := hex2Bytes(p.Signature)
 	pubKeyBytes := hex2Bytes(p.PublicKey)
+	signedTxBytes := hex2Bytes(p.SignedTx)
+	if len(sigBytes) == 0 || len(pubKeyBytes) == 0 || len(signedTxBytes) == 0 {
+		return nil, fmt.Errorf("signature, publicKey and signedTx must be provided in hex format")
+	}
+	if len(sigBytes) != 65 {
+		return nil, fmt.Errorf("signature must be 65 bytes long")
+	}
 
-	record, err := core.NewRecord(p.Domain, p.TTL, sigBytes, pubKeyBytes)
+	record, err := core.NewRecord(p.Domain, p.TTL, sigBytes, pubKeyBytes, signedTxBytes)
 	if err != nil {
 		return nil, err
 	}
 
+	valid, err := evm.ValidateSignedTx(record)
+	if err != nil || !valid {
+		return nil, fmt.Errorf("signedTx validation failed: %w", err)
+	}
+
 	if err := s.node.Store.Add(record); err != nil {
 		return nil, fmt.Errorf("failed to register domain: %w", err)
+	}
+	if err := s.node.PublishRecord(record); err != nil {
+		_ = s.node.Store.RejectRecord(p.Domain)
+		return nil, fmt.Errorf("failed to publish registration: %w", err)
 	}
 	return record, nil
 }

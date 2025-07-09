@@ -1,11 +1,10 @@
 package main
 
 import (
+	"altica_node/utils"
 	"flag"
 	"fmt"
 	"os"
-
-	"altica_node/core"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -33,7 +32,7 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	privateKey := core.LoadPrivateKey(*privateKeyPath)
+	privateKey := utils.LoadPrivateKey(*privateKeyPath)
 
 	// Get signer address
 	signerAddress := crypto.PubkeyToAddress(privateKey.PublicKey)

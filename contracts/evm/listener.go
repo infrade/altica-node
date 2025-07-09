@@ -1,7 +1,7 @@
 package evm
 
 import (
-	"altica_node/core"
+	"altica_node/utils"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,14 +24,18 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
+// Store interface for dependency injection, avoiding circular dependency
+// Only the required method is declared here
+// The actual implementation should be passed in from the main application
+
 // EventListener listens for events from the AlticaRegistry contract
 type EventListener struct {
 	client       *ethclient.Client
 	contract     *bind.BoundContract
-	store        *core.RecordStore
 	log          *logrus.Logger
 	contractAddr common.Address
 	fromBlock    uint64
+	store        utils.RecordStore
 }
 
 // loadABI loads the ABI from the contracts output folder
@@ -73,7 +77,8 @@ func LoadABI() abi.ABI {
 }
 
 // NewEventListener creates a new event listener
-func NewEventListener(store *core.RecordStore) (*EventListener, error) {
+// Accepts a RecordStore as a parameter
+func NewEventListener(store utils.RecordStore) (*EventListener, error) {
 	// Get RPC URL from environment
 	rpcURL := os.Getenv("EVM_RPC_URL")
 	if rpcURL == "" {
@@ -109,10 +114,10 @@ func NewEventListener(store *core.RecordStore) (*EventListener, error) {
 	return &EventListener{
 		client:       client,
 		contract:     contract,
-		store:        store,
 		log:          logrus.New(),
 		contractAddr: common.HexToAddress(contractAddr),
 		fromBlock:    deploymentBlock,
+		store:        store,
 	}, nil
 }
 
@@ -208,15 +213,12 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 	}
 
 	// Get the signer address from the record
-	recordSigner, err := record.GetSignerAddress()
-	if err != nil {
-		return fmt.Errorf("failed to get record signer address: %w", err)
-	}
+	recordSigner := record.GetSigner()
 	var accepted bool
 	// Verify the signer matches
 	if !strings.EqualFold(recordSigner.Hex(), event.Signer.Hex()) {
 		l.log.WithFields(logrus.Fields{
-			"domain":       record.Domain,
+			"domain":       record.GetDomain(),
 			"dht_signer":   recordSigner.Hex(),
 			"event_signer": event.Signer.Hex(),
 		}).Info("Signer mismatch")
@@ -238,7 +240,7 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 	}
 
 	l.log.WithFields(logrus.Fields{
-		"domain":   record.Domain,
+		"domain":   record.GetDomain(),
 		"tx_hash":  tx.Hash().Hex(),
 		"accepted": accepted,
 	}).Info("Called oracleDecideSigner")
@@ -304,5 +306,5 @@ func (l *EventListener) setLastSyncedBlock(block uint64) error {
 }
 
 func getEVMListenerDBPath() string {
-	return filepath.Join(core.GetDataDir(), "evm_listener")
+	return filepath.Join(utils.GetDataDir(), "evm_listener")
 }

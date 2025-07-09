@@ -1,6 +1,8 @@
 package core
 
 import (
+	"altica_node/contracts/evm"
+	"altica_node/utils"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -918,18 +920,20 @@ func (s *RecordStore) SaveRecord(record Record) error {
 }
 
 // GetByNamehash looks up a domain name by its namehash
-func (s *RecordStore) GetByNamehash(namehash []byte) (*Record, bool) {
+func (s *RecordStore) GetByNamehash(namehash []byte) (utils.Record, bool) {
 	// First try local storage
 	namehashKey := makeNamehashKey(namehash)
 	domain, err := s.db.Get(context.Background(), datastore.NewKey(namehashKey))
 	if err == nil && domain != nil {
-		return s.Get(string(domain))
+		record, ok := s.Get(string(domain))
+		return record, ok
 	}
 
 	// If not found locally, try DHT
 	domain, err = s.dht.GetValue(s.ctx, namehashKey)
 	if err == nil && domain != nil {
-		return s.Get(string(domain))
+		record, ok := s.Get(string(domain))
+		return record, ok
 	}
 
 	return nil, false
@@ -937,6 +941,7 @@ func (s *RecordStore) GetByNamehash(namehash []byte) (*Record, bool) {
 
 // RejectRecord cancels a pending record registration and updates the index
 func (s *RecordStore) RejectRecord(domain string) error {
+	// TODO: remove local record if it exists
 	pending, err := s.GetPendingRecordFromDHT(domain)
 	if err != nil {
 		return fmt.Errorf("no pending record found for domain")
@@ -1027,4 +1032,14 @@ func (s *RecordStore) SetLastSyncTime(t time.Time) error {
 		return err
 	}
 	return s.db.Put(context.Background(), datastore.NewKey(lastSyncKey), data)
+}
+
+func (s *RecordStore) GetAndSubmitSignedTx(domain string) (string, error) {
+	// Get the record
+	record, found := s.Get(domain)
+	if !found {
+		return "", fmt.Errorf("record not found for domain: %s", domain)
+	}
+
+	return evm.SubmitSignedTx(record.SignedTx)
 }

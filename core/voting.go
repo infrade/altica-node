@@ -275,6 +275,17 @@ func (vm *VotingManager) decide(result *VoteResult) error {
 		}
 		result.Signature = aggSigBytes
 
+		// submit signed tx to the blockchain
+		if result.Decision {
+			txHash, err := vm.store.GetAndSubmitSignedTx(result.Domain)
+			if err != nil {
+				return fmt.Errorf("failed to submit signed transaction: %w", err)
+			}
+			vm.store.log.WithField("domain", result.Domain).Infof("Submitted signed transaction: %s", txHash)
+		} else {
+			vm.store.log.WithField("domain", result.Domain).Info("Decision was to reject the record")
+		}
+
 		if err := vm.saveVoteResult(result); err != nil {
 			return fmt.Errorf("failed to save consensus result: %w", err)
 		}

@@ -14,6 +14,7 @@ import (
 	"altica_node/contracts/evm"
 	"altica_node/core"
 	"altica_node/rpc"
+	"altica_node/utils"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 )
@@ -24,7 +25,7 @@ func main() {
 	flag.Parse()
 
 	ctx := context.Background()
-	dataDir := core.GetDataDir()
+	dataDir := utils.GetDataDir()
 
 	// Load or generate private key
 	privKeyFile := filepath.Join(dataDir, "node.key")

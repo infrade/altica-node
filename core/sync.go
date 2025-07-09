@@ -2,6 +2,7 @@
 package core
 
 import (
+	"altica_node/contracts/evm"
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
@@ -126,19 +127,19 @@ func (n *Node) handleRecordUpdates(sub *pubsub.Subscription) {
 		fmt.Println("successfully unmarshalled", recordMsg.Version, n.Store.GetCurrentVersion())
 
 		// Check if we need this update based on version and state root
-		for _, record := range recordMsg.Records {
-			if existingRecord, err := n.Store.GetLatestRecord(record.Domain); err == nil {
-				if existingRecord.Version >= record.Version {
-					n.log.WithFields(logrus.Fields{
-						"domain":         record.Domain,
-						"local_version":  existingRecord.Version,
-						"remote_version": record.Version,
-					}).Debug("Ignoring outdated record update")
-					continue
-				}
-			}
-			fmt.Println("Processing record update:", record.Version, record.Domain)
-		}
+		// for _, record := range recordMsg.Records {
+		// 	if existingRecord, err := n.Store.GetLatestRecord(record.Domain); err == nil {
+		// 		if existingRecord.Version >= record.Version {
+		// 			n.log.WithFields(logrus.Fields{
+		// 				"domain":         record.Domain,
+		// 				"local_version":  existingRecord.Version,
+		// 				"remote_version": record.Version,
+		// 			}).Debug("Ignoring outdated record update")
+		// 			continue
+		// 		}
+		// 	}
+		// 	fmt.Println("Processing record update:", record.Version, record.Domain)
+		// }
 
 		switch recordMsg.Type {
 		case "snapshot":
@@ -273,9 +274,10 @@ func (n *Node) publishBatch(topic *pubsub.Topic, msg RecordMessage) error {
 }
 
 func (n *Node) handleRegistrationIntent(msg RecordMessage) {
+	// skip if node is the publisher
 	for _, entry := range msg.Records {
 		// Each peer validates the record
-		accept := false
+		valid := false
 		record, found := n.Store.Get(entry.Domain)
 		if !found {
 			n.log.Error("record not found")
@@ -283,15 +285,27 @@ func (n *Node) handleRegistrationIntent(msg RecordMessage) {
 			n.log.Error("Record is not pending")
 		} else if !record.Verify() {
 			n.log.Error("Invalid record signature")
+		}
+
+		valid, err := evm.ValidateSignedTx(record)
+
+		if err != nil {
+			n.log.WithError(err).Error("Failed to validate signed transaction")
+		} else if !valid {
+			n.log.Error("Signed transaction validation failed")
 		} else {
-			accept = true
+			n.log.WithFields(logrus.Fields{
+				"domain": record.Domain,
+				"valid":  valid,
+			}).Info("Record and signedTx are valid")
 		}
 
 		// Submit vote using voting manager
 		if n.Store.votingManager != nil {
-			if err := n.Store.votingManager.SubmitVote(record.Domain, accept); err != nil {
+			if err := n.Store.votingManager.SubmitVote(record.Domain, valid); err != nil {
 				n.log.WithError(err).Error("Failed to submit vote")
 			}
+
 		}
 	}
 }

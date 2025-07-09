@@ -26,7 +26,7 @@ type Record struct {
 	Versions  map[string]RecordVersion `json:"versions,omitempty"` // peerID -> version
 	Latest    RecordVersion            `json:"latest,omitempty"`   // Latest version info
 	Signer    common.Address           `json:"signer"`             // EVM-like address of the signer
-	SignedTx  []byte                   `json:"signedTx"`           //Signed tx, needs to be valid for initial binding
+	SignedTx  []byte                   `json:"signed_tx"`          //Signed tx, needs to be valid for initial binding
 }
 
 // RecordVersion represents a version of a record
@@ -37,8 +37,21 @@ type RecordVersion struct {
 	Hash      string `json:"hash"` // Hash of the record content
 }
 
+func (r *Record) GetDomain() string {
+	return r.Domain
+}
+func (r *Record) GetSignedTx() []byte {
+	return r.SignedTx
+}
+func (r *Record) GetSigner() common.Address {
+	return r.Signer
+}
+func (r *Record) GetNamehash() []byte {
+	return r.Namehash
+}
+
 // NewRecord creates a new unsigned record
-func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte) (*Record, error) {
+func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte, signedTx []byte) (*Record, error) {
 
 	record := &Record{
 		Domain:    domain,
@@ -48,6 +61,7 @@ func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte
 		Signature: signature,
 		PublicKey: pubKey,
 		Metadata:  make(map[string]interface{}),
+		SignedTx:  signedTx,
 	}
 
 	// Initialize versioning
@@ -117,12 +131,17 @@ func (r *Record) Verify() bool {
 
 	// Compare the recovered public key with the stored one
 	recoveredPubKeyBytes := crypto.FromECDSAPub(pubKey)
-	return hex.EncodeToString(recoveredPubKeyBytes) == hex.EncodeToString(r.PublicKey)
+	if hex.EncodeToString(recoveredPubKeyBytes) != hex.EncodeToString(r.PublicKey) {
+		return false
+	}
+	return true
 }
 
 // GetSignerAddress returns the Ethereum address of the signer
 func (r *Record) GetSignerAddress() (common.Address, error) {
-
+	if r.Signer != (common.Address{}) {
+		return r.Signer, nil
+	}
 	// If Signer is not set, derive it from the public key
 	pubKey, err := crypto.UnmarshalPubkey(r.PublicKey)
 	if err != nil {
@@ -181,29 +200,32 @@ func (r *Record) serializeForSigning() ([]byte, error) {
 	return json.Marshal(unsigned)
 }
 
-// MarshalJSON customizes JSON output for Record to encode Signature, PublicKey, and Namehash as hex strings
+// MarshalJSON customizes JSON output for Record to encode Signature, PublicKey, Namehash, and SignedTx as hex strings
 func (r *Record) MarshalJSON() ([]byte, error) {
 	type Alias Record
 	return json.Marshal(&struct {
 		Signature string `json:"signature,omitempty"`
 		PublicKey string `json:"public_key,omitempty"`
 		Namehash  string `json:"namehash,omitempty"`
+		SignedTx  string `json:"signed_tx,omitempty"`
 		*Alias
 	}{
 		Signature: hex.EncodeToString(r.Signature),
 		PublicKey: hex.EncodeToString(r.PublicKey),
 		Namehash:  hex.EncodeToString(r.Namehash),
+		SignedTx:  hex.EncodeToString(r.SignedTx),
 		Alias:     (*Alias)(r),
 	})
 }
 
-// UnmarshalJSON customizes JSON input for Record to decode Signature, PublicKey, and Namehash from hex strings
+// UnmarshalJSON customizes JSON input for Record to decode Signature, PublicKey, Namehash, SignedTx from hex strings
 func (r *Record) UnmarshalJSON(data []byte) error {
 	type Alias Record
 	temp := &struct {
 		Signature string `json:"signature,omitempty"`
 		PublicKey string `json:"public_key,omitempty"`
 		Namehash  string `json:"namehash,omitempty"`
+		SignedTx  string `json:"signed_tx,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -231,6 +253,13 @@ func (r *Record) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		r.Namehash = b
+	}
+	if temp.SignedTx != "" {
+		b, err := hex.DecodeString(temp.SignedTx)
+		if err != nil {
+			return err
+		}
+		r.SignedTx = b
 	}
 	return nil
 }

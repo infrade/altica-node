@@ -1,31 +1,37 @@
 package evm
 
 import (
+	"altica_node/utils"
+	"bytes"
+	"context"
 	"crypto/ecdsa"
-	"encoding/hex"
 	"fmt"
+	"log"
 	"math/big"
-	"strings"
+	"os"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-type EVMTx2 struct {
-	ChainID    *big.Int
-	Nonce      uint64
-	GasTipCap  *big.Int // maxPriorityFeePerGas
-	GasFeeCap  *big.Int // maxFeePerGas
-	Gas        uint64
-	To         *common.Address
-	Value      *big.Int
-	Data       []byte
-	AccessList []struct{}
-	V, R, S    *big.Int
-}
+// type EVMTx2 struct {
+// 	ChainID    *big.Int
+// 	Nonce      uint64
+// 	GasTipCap  *big.Int // maxPriorityFeePerGas
+// 	GasFeeCap  *big.Int // maxFeePerGas
+// 	Gas        uint64
+// 	To         *common.Address
+// 	Value      *big.Int
+// 	Data       []byte
+// 	AccessList []struct{}
+// 	V, R, S    *big.Int
+// }
 
 // Helper to create ABI types
 func mustABIType(t string) abi.Type {
@@ -38,6 +44,24 @@ func mustABIType(t string) abi.Type {
 
 // GenerateBindingSignature generates a signature for submitting a binding to the AlticaRegistry contract
 func GenerateBindingSignature(privateKey *ecdsa.PrivateKey, contractAddr common.Address, chainID int, namehash []byte, resolver common.Address, expiresAt uint64, timestamp uint64) ([]byte, error) {
+	digest, err := GetDigest(namehash, resolver, expiresAt, timestamp, chainID, contractAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sign
+	signature, err := crypto.Sign(digest, privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign binding: %w", err)
+	}
+	// Fix v value for EVM
+	if signature[64] < 27 {
+		signature[64] += 27
+	}
+	return signature, nil
+}
+
+func GetDigest(namehash []byte, resolver common.Address, expiresAt uint64, timestamp uint64, chainID int, contractAddr common.Address) ([]byte, error) {
 	typeHashSlice := crypto.Keccak256([]byte("SubmitBinding(bytes32 namehash,address resolver,uint64 expiresAt,uint64 timestamp)"))
 	var typeHash [32]byte
 	copy(typeHash[:], typeHashSlice)
@@ -105,17 +129,7 @@ func GenerateBindingSignature(privateKey *ecdsa.PrivateKey, contractAddr common.
 	fmt.Printf("DomainSeparator: 0x%x\n", domainSeparator)
 	fmt.Printf("Digest: 0x%x\n", digest)
 	fmt.Printf("StructHash: 0x%x\n", structHash)
-
-	// Sign
-	signature, err := crypto.Sign(digest, privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign binding: %w", err)
-	}
-	// Fix v value for EVM
-	if signature[64] < 27 {
-		signature[64] += 27
-	}
-	return signature, nil
+	return digest, nil
 }
 
 // PreSignSubmitBindingTxEIP1559 pre-signs an EIP-1559 (type 2) EVM transaction for SubmitBinding
@@ -145,7 +159,7 @@ func PreSignSubmitBindingTxEIP1559(
 	}
 
 	// Build EIP-1559 tx (type 2)
-	txData := &types.EVMTx2{
+	txData := &types.DynamicFeeTx{
 		ChainID:   big.NewInt(int64(chainID)),
 		Nonce:     nonce,
 		GasTipCap: maxPriorityFeePerGas,
@@ -172,39 +186,51 @@ func PreSignSubmitBindingTxEIP1559(
 	return signedTxBytes, nil
 }
 
-func DecodeType2Tx(signedTx string) (EVMTx2, error) {
-	raw := strings.TrimPrefix(signedTx, "0x")
-	rawBytes, err := hex.DecodeString(raw)
-	if err != nil {
-		return EVMTx2{}, fmt.Errorf("Invalid hex: %v", err)
+func decodeSignedTx(signedTx []byte) (types.Transaction, error) {
+	var tx *types.Transaction
+
+	if signedTx[0] == 0x02 {
+		// Typed transaction (EIP-1559)
+		var inner types.DynamicFeeTx
+		if err := rlp.DecodeBytes(signedTx[1:], &inner); err != nil {
+			log.Fatalf("RLP decode error: %v", err)
+		}
+		tx = types.NewTx(&inner)
+	} else {
+		// Legacy transaction (EIP-155)
+		tx = new(types.Transaction)
+		if err := tx.UnmarshalBinary(signedTx); err != nil {
+			log.Fatalf("Unmarshal error: %v", err)
+		}
 	}
+	return *tx, nil
 
-	if len(rawBytes) == 0 || rawBytes[0] != 0x02 {
-		return EVMTx2{}, fmt.Errorf("Not a Type 2 transaction (missing 0x02 prefix)")
-	}
+	// if len(rawBytes) == 0 || rawBytes[0] != 0x02 {
+	// 	return EVMTx2{}, fmt.Errorf("Not a Type 2 transaction (missing 0x02 prefix)")
+	// }
 
-	txPayload := rawBytes[1:] // strip 0x02
-	var tx EVMTx2
+	// txPayload := rawBytes[1:] // strip 0x02
+	// var tx EVMTx2
 
-	err = rlp.DecodeBytes(txPayload, &tx)
-	if err != nil {
-		return EVMTx2{}, fmt.Errorf("Failed to decode tx: %v", err)
-	}
+	// err = rlp.DecodeBytes(txPayload, &tx)
+	// if err != nil {
+	// 	return EVMTx2{}, fmt.Errorf("Failed to decode tx: %v", err)
+	// }
 
-	fmt.Println("=== Decoded Type 2 Transaction ===")
-	fmt.Println("Nonce:              ", tx.Nonce)
-	fmt.Println("To:                 ", tx.To.Hex())
-	fmt.Println("Value (ETH):        ", weiToEth(tx.Value))
-	fmt.Println("Gas Limit:          ", tx.Gas)
-	fmt.Println("Max Fee Per Gas:    ", tx.GasFeeCap, "wei")
-	fmt.Println("Max Priority Fee:   ", tx.GasTipCap, "wei")
-	fmt.Println("Chain ID:           ", tx.ChainID)
-	fmt.Println("Data (hex):         ", hex.EncodeToString(tx.Data))
-	fmt.Println("Signature:")
-	fmt.Println("  v: ", tx.V)
-	fmt.Println("  r: ", tx.R)
-	fmt.Println("  s: ", tx.S)
-	return tx, nil
+	// fmt.Println("=== Decoded Type 2 Transaction ===")
+	// fmt.Println("Nonce:              ", tx.Nonce)
+	// fmt.Println("To:                 ", tx.To.Hex())
+	// fmt.Println("Value (ETH):        ", weiToEth(tx.Value))
+	// fmt.Println("Gas Limit:          ", tx.Gas)
+	// fmt.Println("Max Fee Per Gas:    ", tx.GasFeeCap, "wei")
+	// fmt.Println("Max Priority Fee:   ", tx.GasTipCap, "wei")
+	// fmt.Println("Chain ID:           ", tx.ChainID)
+	// fmt.Println("Data (hex):         ", hex.EncodeToString(tx.Data))
+	// fmt.Println("Signature:")
+	// fmt.Println("  v: ", tx.V)
+	// fmt.Println("  r: ", tx.R)
+	// fmt.Println("  s: ", tx.S)
+	// return tx, nil
 }
 
 func weiToEth(wei *big.Int) string {
@@ -212,9 +238,189 @@ func weiToEth(wei *big.Int) string {
 	return eth.Text('f', 18)
 }
 
-// Validates the tx for submission
-func (tx *EVMTx2) Validate() bool {
-	// check:
-	// 		nonce
-	return true
+func getFromAddress(tx types.Transaction) (common.Address, error) {
+	// Need signer (depends on tx type)
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	sender, err := types.Sender(signer, &tx)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("cannot recover sender: %w", err)
+	}
+	return sender, nil
+}
+
+// _validateSignedTx checks that the decoded transaction matches the expected parameters and is valid for submission
+func _validateSignedTx(
+	tx types.Transaction,
+	expectedFrom common.Address,
+	expectedNamehash []byte,
+	// expectedGas uint64,
+) (bool, error) {
+	// Only support CHAIN_ID from env
+	chainID, err := strconv.ParseInt(os.Getenv("EVM_CHAIN_ID"), 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("Invalid ChainID %v", err)
+	}
+	expectedTo := common.HexToAddress(os.Getenv("EVM_ALTICA_REGISTRY_ADDRESS"))
+	rpcURL := os.Getenv("EVM_RPC_URL")
+
+	if tx.ChainId() == nil || tx.ChainId().Cmp(big.NewInt(chainID)) != 0 {
+		return false, fmt.Errorf("unsupported chainID: got %v, want %d", tx.ChainId(), chainID)
+	}
+
+	// Value must be exactly 0.01 ETH
+	expectedValue := big.NewInt(0).Mul(big.NewInt(1e15), big.NewInt(1)) // 0.001 ETH in wei
+	if tx.Value() == nil || tx.Value().Cmp(expectedValue) == -1 {
+		return false, fmt.Errorf("value mismatch: got %v, want 0.01 ETH", weiToEth(tx.Value()))
+	}
+
+	if tx.To() == nil || *tx.To() != expectedTo {
+		return false, fmt.Errorf("to address mismatch: got %v, want %v", tx.To(), expectedTo)
+	}
+	// if tx.Gas() != expectedGas {
+	// 	return false, fmt.Errorf("gas mismatch: got %d, want %d", tx.Gas(), expectedGas)
+	// }
+
+	fromAddress, err := getFromAddress(tx)
+	if err != nil {
+		return false, fmt.Errorf("Cannot get fromAddress %v", err)
+	}
+	if fromAddress != expectedFrom {
+		return false, fmt.Errorf("fromAddress is not expected address")
+	}
+
+	// Fetch nonce from the blockchain
+	client, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		return false, fmt.Errorf("failed to connect to Ethereum node: %w", err)
+	}
+	defer client.Close()
+	ctx := context.Background()
+
+	// ensure that there's code at the contract address
+	if code, err := client.CodeAt(ctx, expectedTo, nil); err != nil {
+		return false, fmt.Errorf("failed to get code at contract address: %w", err)
+	} else if len(code) == 0 {
+		return false, fmt.Errorf("no code found at contract address %s", expectedTo.Hex())
+	}
+
+	nonce, err := client.PendingNonceAt(ctx, expectedFrom)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch nonce: %w", err)
+	}
+	if tx.Nonce() != nonce {
+		return false, fmt.Errorf("nonce mismatch: got %d, want %d (pending nonce from chain)", tx.Nonce(), nonce)
+	}
+	return validateTxData(tx, expectedNamehash, expectedFrom)
+}
+
+func validateTxData(tx types.Transaction, expectedNamehash []byte, signerAddress common.Address) (bool, error) {
+	parsedABI := LoadABI()
+	txData := tx.Data()
+	chainID := int(tx.ChainId().Int64())
+	contractAddr := tx.To()
+
+	method, err := parsedABI.MethodById(txData[:4])
+	if err != nil {
+		return false, fmt.Errorf("failed to get called method from ABI: %v", err)
+	}
+	fmt.Println("Method:", method.Name)
+	if method.Name != "SubmitBinding" {
+		return false, fmt.Errorf("Called method in SignedTx is not 'SubmitBinding', it is '%s'", method.Name)
+	}
+	args, err := method.Inputs.Unpack(txData[4:])
+	if err != nil {
+		return false, fmt.Errorf("failed to decode args: %v", err)
+	}
+
+	namehash, ok0 := getBytesArg(args[0])
+	sig, ok4 := getBytesArg(args[4])
+	if !ok0 || !ok4 {
+		return false, fmt.Errorf("Failed to cast args[0] or args[4] to []byte (signature)")
+	}
+	resolver, ok1 := args[1].(common.Address)
+	if !ok1 {
+		return false, fmt.Errorf("Failed to cast args[1] to common.Address")
+	}
+	expiresAt := args[2].(uint64)
+	timestamp := args[3].(uint64)
+
+	// Compare namehash slices using bytes.Equal
+	if !bytes.Equal(namehash, expectedNamehash) {
+		return false, fmt.Errorf("Invalid namehash in signedTx")
+	} else if expiresAt <= timestamp {
+		return false, fmt.Errorf("args[2] is less than or equal to args[3] in signedTx")
+	}
+
+	digest, err := GetDigest(namehash, resolver, expiresAt, timestamp, chainID, *contractAddr)
+	if err != nil {
+		return false, fmt.Errorf("Cannot compute digest %v", err)
+	}
+	// Fix v value if needed
+	if len(sig) == 65 && sig[64] >= 27 {
+		sig[64] -= 27
+	}
+	// Ecrecover signer
+	pubKeyBytes, err := crypto.Ecrecover(digest, sig)
+
+	if err != nil {
+		return false, fmt.Errorf("Failed to ecrecover pubkey from signature: %v", err)
+	}
+	pubKey, err := crypto.UnmarshalPubkey(pubKeyBytes)
+	if err != nil {
+		return false, fmt.Errorf("Failed to unmarshal pubkey: %v", err)
+	}
+	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+	if !bytes.Equal(recoveredAddr.Bytes(), signerAddress.Bytes()) {
+		return false, fmt.Errorf("Signature does not match expected signer: got %s, want %s", recoveredAddr.Hex(), signerAddress.Hex())
+	}
+
+	return true, nil
+}
+
+func getBytesArg(arg interface{}) ([]byte, bool) {
+	var value []byte
+	switch v := arg.(type) {
+	case [32]byte:
+		value = v[:]
+	case []byte:
+		value = v
+	default:
+		return nil, false
+	}
+	return value, true
+}
+
+func ValidateSignedTx(record utils.Record) (bool, error) {
+	tx, err := decodeSignedTx(record.GetSignedTx())
+	if err != nil {
+		return false, fmt.Errorf("Invalid signedTx, %v", err)
+	}
+	valid, err := _validateSignedTx(tx, record.GetSigner(), record.GetNamehash())
+	if err != nil || !valid {
+		return false, fmt.Errorf("signedTx validation failed, %v", err)
+	}
+	return valid, nil
+}
+
+// SubmitSignedTx submits a signed transaction to the blockchain and returns the tx hash
+func SubmitSignedTx(signedTx []byte) (string, error) {
+	rpcURL := os.Getenv("EVM_RPC_URL")
+	if rpcURL == "" {
+		return "", fmt.Errorf("EVM_RPC_URL environment variable is not set")
+	}
+	client, err := ethclient.Dial(rpcURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to Ethereum node: %w", err)
+	}
+	defer client.Close()
+
+	// Use the underlying RPC client to send the raw transaction
+	rpcClient := client.Client()
+	var txHash common.Hash
+	err = rpcClient.CallContext(context.Background(), &txHash, "eth_sendRawTransaction", hexutil.Encode(signedTx))
+	if err != nil {
+		return "", fmt.Errorf("failed to send raw transaction: %w", err)
+	}
+
+	return txHash.Hex(), nil
 }
