@@ -3,6 +3,7 @@ package evm
 import (
 	"altica_node/utils"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -152,8 +153,6 @@ func (l *EventListener) Start(ctx context.Context) error {
 			if err := l.handleSubmittedBinding(log); err != nil {
 				l.log.WithError(err).Error("Failed to handle historical SubmittedBinding event")
 			}
-			// Persist the block number after each log
-			l.setLastSyncedBlock(uint64(log.BlockNumber))
 		}
 		l.setLastSyncedBlock(latestBlock)
 	}
@@ -162,7 +161,7 @@ func (l *EventListener) Start(ctx context.Context) error {
 	query.FromBlock = big.NewInt(int64(latestBlock))
 	query.ToBlock = nil
 
-	logs := make(chan types.Log)
+	logs := make(chan types.Log, 100)
 	sub, err := l.client.SubscribeFilterLogs(ctx, query, logs)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to logs: %w", err)
@@ -192,6 +191,15 @@ func (l *EventListener) Start(ctx context.Context) error {
 	return nil
 }
 
+func (l *EventListener) Stop() {
+	// Implement any necessary cleanup logic here
+	l.log.Info("Stopping EventListener")
+	// For example, you might want to close the client connection or unsubscribe from logs
+	if l.client != nil {
+		l.client.Close()
+	}
+}
+
 // handleSubmittedBinding processes a SubmittedBinding event
 func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 	// Parse the event
@@ -206,9 +214,16 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 		return fmt.Errorf("failed to unpack event: %w", err)
 	}
 
-	record, found := l.store.GetByNamehash(event.Namehash[:])
+	var record utils.Record
+	var found bool
+	const maxRetries = 4
+	for attempt := 1; !found && attempt <= maxRetries; attempt++ {
+		record, found = l.store.GetByNamehash(event.Namehash[:])
+		time.Sleep(time.Duration(2<<attempt) * time.Second) // exponential backoff: 4, 8, 16, 32 seconds
+	}
+
 	if !found {
-		l.log.WithField("namehash", event.Namehash).Info("No matching record found in DHT")
+		l.log.WithField("namehash", hex.EncodeToString(event.Namehash[:])).Info("No matching record found in DHT after retries")
 		return nil
 	}
 
@@ -233,18 +248,34 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 		return fmt.Errorf("failed to get transaction options: %w", err)
 	}
 
-	// TODO: check if correct signer exists on-chain already, and skip if it does.
-	tx, err := l.contract.Transact(auth, "oracleDecideSigner", event.Namehash, event.Signer, accepted)
+	var output []interface{}
+	// Call the contract's bindingSigner mapping to get the current signer
+	err = l.contract.Call(nil, &output, "bindingSigner", event.Namehash)
 	if err != nil {
-		return fmt.Errorf("failed to call oracleDecideSigner: %w", err)
+		return fmt.Errorf("failed to read bindingSigner from contract: %w", err)
 	}
+	// bindingSigner returns address, decode it
+	onChainSigner := output[0].(common.Address)
 
-	l.log.WithFields(logrus.Fields{
-		"domain":   record.GetDomain(),
-		"tx_hash":  tx.Hash().Hex(),
-		"accepted": accepted,
-	}).Info("Called oracleDecideSigner")
+	if strings.EqualFold(onChainSigner.Hex(), recordSigner.Hex()) {
+		l.log.WithFields(logrus.Fields{
+			"domain":         record.GetDomain(),
+			"record_signer":  recordSigner.Hex(),
+			"onchain_signer": onChainSigner.Hex(),
+		}).Info("Signer already correct on-chain, skipping oracleDecideSigner")
+	} else {
+		tx, err := l.contract.Transact(auth, "oracleDecideSigner", event.Namehash, recordSigner, accepted)
+		if err != nil {
+			return fmt.Errorf("failed to call oracleDecideSigner: %w", err)
+		}
 
+		l.log.WithFields(logrus.Fields{
+			"domain":   record.GetDomain(),
+			"tx_hash":  tx.Hash().Hex(),
+			"accepted": accepted,
+		}).Info("Called oracleDecideSigner")
+	}
+	l.setLastSyncedBlock(uint64(log.BlockNumber))
 	return nil
 }
 

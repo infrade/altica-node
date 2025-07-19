@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { EIP712Upgradeable } from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
-import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 // TODO: add access control
-contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable {
+// TODO: add billing, renewal, and refunding logic
+contract AlticaRegistry is
+    Initializable,
+    OwnableUpgradeable,
+    EIP712Upgradeable
+{
     using ECDSA for bytes32;
     enum Status {
         pending,
@@ -26,16 +31,23 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
     bytes32 private BIND_TYPEHASH;
     uint64 public MAX_TIME_DRIFT;
 
-
-    event SubmittedBinding(bytes32 indexed namehash, address indexed signer, uint64 expiresAt);
+    event SubmittedBinding(
+        bytes32 indexed namehash,
+        address indexed signer,
+        uint64 expiresAt
+    );
     event DeletedBinding(bytes32 indexed namehash, address indexed signer);
-    event NameBound(bytes32 indexed namehash, address indexed resolver, uint64 expiresAt);
+    event NameBound(
+        bytes32 indexed namehash,
+        address indexed resolver,
+        uint64 expiresAt
+    );
     event SignerBound(bytes32 indexed namehash, address indexed signer);
 
     function initialize() public initializer {
-        BIND_TYPEHASH  = keccak256(
-        "SubmitBinding(bytes32 namehash,address resolver,uint64 expiresAt,uint64 timestamp)"
-    );
+        BIND_TYPEHASH = keccak256(
+            "SubmitBinding(bytes32 namehash,address resolver,uint64 expiresAt,uint64 timestamp)"
+        );
         MAX_TIME_DRIFT = 15 minutes;
         __Ownable_init(msg.sender);
         __EIP712_init("AlticaRegistry", "0");
@@ -43,7 +55,7 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
 
     /// @notice Submits Binding of a namehash to a resolver via off-chain signature
     /// @param namehash The name's bytes32 hash (e.g., namehash of "foo.alt")
-    /// @param resolver Address to resolve this name    
+    /// @param resolver Address to resolve this name
     /// @param expiresAt Unix timestamp when this binding should expire
     /// @param timestamp Time when the message was signed
     /// @param sig Signature by signer authorizing the binding
@@ -54,44 +66,71 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
         uint64 timestamp,
         bytes calldata sig
     ) external payable {
-        require(block.timestamp <= timestamp + MAX_TIME_DRIFT, "Stale signature");
-
-        Binding memory current = bindings[namehash];
-        require(current.expiresAt < block.timestamp, "Name already bound");
-        
-        (, bytes32 digest) = computeStructHashAndDigest(
-            namehash, resolver, expiresAt, timestamp
+        require(
+            block.timestamp <= timestamp + MAX_TIME_DRIFT,
+            "Stale signature"
         );
-        address signer = ECDSA.recover(digest, sig);
-        bindings[namehash] = Binding(resolver, expiresAt, signer, Status.pending);
+        require(
+            block.timestamp > bindings[namehash].expiresAt,
+            "Name already bound"
+        );
 
-        emit SubmittedBinding(namehash, signer, expiresAt);
-    }
-
-    function computeStructHashAndDigest(bytes32 namehash, address resolver, uint64 expiresAt, uint64 timestamp) public view returns (bytes32, bytes32) {
-        bytes32 structHash = keccak256(abi.encode(
-            BIND_TYPEHASH,
+        (, bytes32 digest) = computeStructHashAndDigest(
             namehash,
             resolver,
             expiresAt,
             timestamp
-        ));
+        );
+        address signer = ECDSA.recover(digest, sig);
+
+        bindings[namehash] = Binding(
+            resolver,
+            expiresAt,
+            signer,
+            Status.pending
+        );
+        emit SubmittedBinding(namehash, signer, expiresAt);
+    }
+
+    function updateResolver(bytes32 namehash, address resolver) external {
+        require(
+            bindingSigner[namehash] == msg.sender,
+            "Only signer can update"
+        );
+        Binding storage b = bindings[namehash];
+        require(b.status == Status.active, "Binding not active");
+        require(b.expiresAt > block.timestamp, "Binding expired");
+
+        b.resolver = resolver;
+
+        emit NameBound(namehash, resolver, b.expiresAt);
+    }
+
+    function computeStructHashAndDigest(
+        bytes32 namehash,
+        address resolver,
+        uint64 expiresAt,
+        uint64 timestamp
+    ) public view returns (bytes32, bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(BIND_TYPEHASH, namehash, resolver, expiresAt, timestamp)
+        );
         bytes32 digest = _hashTypedDataV4(structHash);
         return (structHash, digest);
     }
-    
+
     function debugDomainSeparator() public view returns (bytes32) {
-       return _domainSeparatorV4();
+        return _domainSeparatorV4();
     }
 
-    function finalizeBinding(bytes32 namehash) external {
+    function finalizeBinding(bytes32 namehash) internal {
         address signer = bindingSigner[namehash];
         require(signer != address(0), "Signer not broadcasted");
 
         Binding storage b = bindings[namehash];
         require(b.status == Status.pending, "Binding Finalized");
         require(b.expiresAt > block.timestamp, "Binding Expired");
-        require(b.signer == signer, "Invalid signature");
+        require(b.signer == signer, "Invalid signer");
         b.status = Status.active;
 
         emit NameBound(namehash, b.resolver, b.expiresAt);
@@ -103,7 +142,7 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
             return address(0);
         }
         Binding memory b = bindings[namehash];
-        if (b.status == Status.active || b.expiresAt > block.timestamp){
+        if (b.status == Status.active || b.expiresAt > block.timestamp) {
             return b.resolver;
         }
         return address(0);
@@ -116,15 +155,25 @@ contract AlticaRegistry is Initializable, OwnableUpgradeable, EIP712Upgradeable 
             delete bindingSigner[namehash];
         }
     }
-    
-    function oracleDecideSigner(bytes32 namehash, address signer, bool accepted) external onlyOwner {
+
+    function oracleDecideSigner(
+        bytes32 namehash,
+        address signer,
+        bool accepted
+    ) external onlyOwner {
         if (!accepted) {
             delete bindings[namehash];
             emit DeletedBinding(namehash, signer);
+            //TODO: add refund logic here
+            return;
         }
-        require(bindingSigner[namehash] == address(0), "Signer exists for binding");
+        require(
+            bindingSigner[namehash] == address(0),
+            "Signer exists for binding"
+        );
         bindingSigner[namehash] = signer;
         emit SignerBound(namehash, signer);
+        finalizeBinding(namehash);
     }
 
     function withdraw() external onlyOwner {

@@ -445,14 +445,15 @@ func SubmitSignedTx(signedTx []byte) (string, error) {
 	isPending := true
 	var tx *types.Transaction
 	// Wait for the transaction to be mined
-	for isPending {
-		time.Sleep(2 * time.Second) // Wait for 2 seconds before checking again
+	const maxRetries = 4
+	for attempt := 1; isPending && attempt <= maxRetries; attempt++ {
+		time.Sleep(time.Duration(2<<attempt) * time.Second) // exponential backoff: 4, 8, 16, 32 seconds
 		// check the result of the transaction using the transaction hash, avoid using := to avoid shadowing
 		tx, isPending, err = client.TransactionByHash(context.Background(), txHash)
 		if err != nil {
 			return "", fmt.Errorf("failed to get transaction by hash: %w", err)
 		}
-		if isPending {
+		if isPending && attempt == maxRetries {
 			return "", fmt.Errorf("transaction is still pending: %s", txHash.Hex())
 		}
 		if tx == nil {

@@ -115,12 +115,6 @@ func (vm *VotingManager) periodicDecisionMaking() {
 
 // processPendingRecords processes all pending records
 func (vm *VotingManager) processPendingRecords() {
-	// time="2025-07-19T01:37:11+01:00" level=info msg="pending domains" domains="[example.alt]"
-	// time="2025-07-19T01:37:11+01:00" level=error msg="Failed to make decision" domain=example.alt error="failed to submit signed transaction: failed to send raw transaction: nonce too low"
-	// time="2025-07-19T01:37:26+01:00" level=info msg="pending domains" domains="[example.alt]"
-	// time="2025-07-19T01:37:26+01:00" level=error msg="Failed to make decision" domain=example.alt error="failed to submit signed transaction: failed to send raw transaction: nonce too low"
-	// TODO: remove rejected records from pending records in DHT
-
 	// Get only pending records from DHT
 	domains, ok := vm.store.GetPendingDomains()
 	if !ok {
@@ -285,6 +279,12 @@ func (vm *VotingManager) decide(result *VoteResult) error {
 		if result.Decision {
 			txHash, err := vm.store.GetAndSubmitSignedTx(result.Domain)
 			if err != nil {
+				vm.store.log.WithError(err).WithField("domain", result.Domain).Debug("Failed to submit signed transaction")
+				vm.store.log.WithError(err).WithField("domain", result.Domain).Debug("rejecting record after failed signedTx submission")
+				if err := vm.store.RejectRecord(result.Domain); err != nil {
+					return fmt.Errorf("failed to reject record after signedTx submission failed: %w", err)
+				}
+				vm.store.log.WithError(err).WithField("domain", result.Domain).Debug("rejected record after failed signedTx submission")
 				return fmt.Errorf("failed to submit signed transaction: %w", err)
 			}
 			vm.store.log.WithField("domain", result.Domain).Infof("Submitted signed transaction: %s", txHash)
@@ -320,6 +320,7 @@ func (vm *VotingManager) getVoteResult(domain string) (*VoteResult, error) {
 }
 
 // saveVoteResult saves vote result to DHT
+// TODO: persist vote result to local leveldb
 func (vm *VotingManager) saveVoteResult(result *VoteResult) error {
 	key := makeVoteKey(result.Domain)
 	data, err := json.Marshal(result)
