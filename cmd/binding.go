@@ -39,6 +39,27 @@ func BindDomain(domain string, resolver string, chainID int, expiresIn int, pk e
 
 	contractAddr := common.HexToAddress(_contractAddr)
 
+	// Sign the record
+	if err := record.Sign(&pk); err != nil {
+		fmt.Printf("Failed to sign record: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Output results
+	fmt.Printf("Domain: %s\n", domain)
+	fmt.Printf("Namehash: %x\n", record.Namehash)
+	fmt.Printf("Resolver: %s\n", resolverAddr.Hex())
+	fmt.Printf("Expires At: %d\n", expiresAt)
+	fmt.Printf("Timestamp: %d\n", now)
+	fmt.Printf("Signature: 0x%x\n", record.Signature)
+	fmt.Printf("PublicKey: 0x%x\n", record.PublicKey)
+
+	gasLimit := uint64(250_000)                      // Enough for EIP-712 bind()
+	var maxPriorityFeePerGas int64 = 2_000_000_000   // 2 Gwei tip
+	var baseFee int64 = 15_000_000_000               // 15 Gwei base fee (can query or estimate)
+	maxFeePerGas := baseFee*2 + maxPriorityFeePerGas // 32 Gwei total
+	var value int64 = 1000000000000000               // 0.001 ETH
+
 	// Generate signature
 	signature, err := evm.GenerateBindingSignature(
 		&pk,
@@ -53,22 +74,9 @@ func BindDomain(domain string, resolver string, chainID int, expiresIn int, pk e
 		fmt.Printf("Error generating signature: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Output results
-	fmt.Printf("Domain: %s\n", domain)
-	fmt.Printf("Namehash: %x\n", record.Namehash)
-	fmt.Printf("Resolver: %s\n", resolverAddr.Hex())
-	fmt.Printf("Expires At: %d\n", expiresAt)
-	fmt.Printf("Timestamp: %d\n", now)
-	fmt.Printf("Signature: 0x%x\n", signature)
-	fmt.Printf("Signature length: %d\n", len(signature))
-	fmt.Printf("Signature v: %d\n", signature[64])
-
-	gasLimit := uint64(250_000)                      // Enough for EIP-712 bind()
-	var maxPriorityFeePerGas int64 = 2_000_000_000   // 2 Gwei tip
-	var baseFee int64 = 15_000_000_000               // 15 Gwei base fee (can query or estimate)
-	maxFeePerGas := baseFee*2 + maxPriorityFeePerGas // 32 Gwei total
-	var value int64 = 1000000000000000               // 0.001 ETH
+	fmt.Printf("EVM Signature : 0x%x\n", signature)
+	fmt.Printf("EVM Signature length: %d\n", len(signature))
+	fmt.Printf("EVM Signature v: %d\n", signature[64])
 
 	signedTx, err := evm.PreSignSubmitBindingTxEIP1559(
 		&pk,

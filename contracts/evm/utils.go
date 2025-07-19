@@ -10,7 +10,9 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -19,19 +21,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rlp"
 )
-
-// type EVMTx2 struct {
-// 	ChainID    *big.Int
-// 	Nonce      uint64
-// 	GasTipCap  *big.Int // maxPriorityFeePerGas
-// 	GasFeeCap  *big.Int // maxFeePerGas
-// 	Gas        uint64
-// 	To         *common.Address
-// 	Value      *big.Int
-// 	Data       []byte
-// 	AccessList []struct{}
-// 	V, R, S    *big.Int
-// }
 
 // Helper to create ABI types
 func mustABIType(t string) abi.Type {
@@ -54,10 +43,12 @@ func GenerateBindingSignature(privateKey *ecdsa.PrivateKey, contractAddr common.
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign binding: %w", err)
 	}
+
 	// Fix v value for EVM
 	if signature[64] < 27 {
 		signature[64] += 27
 	}
+
 	return signature, nil
 }
 
@@ -248,6 +239,18 @@ func getFromAddress(tx types.Transaction) (common.Address, error) {
 	return sender, nil
 }
 
+func ValidateSignedTx(record utils.Record) (bool, error) {
+	tx, err := decodeSignedTx(record.GetSignedTx())
+	if err != nil {
+		return false, fmt.Errorf("Invalid signedTx, %v", err)
+	}
+	valid, err := _validateSignedTx(tx, record.GetSigner(), record.GetNamehash())
+	if err != nil || !valid {
+		return false, fmt.Errorf("signedTx validation failed, %v", err)
+	}
+	return valid, nil
+}
+
 // _validateSignedTx checks that the decoded transaction matches the expected parameters and is valid for submission
 func _validateSignedTx(
 	tx types.Transaction,
@@ -310,10 +313,25 @@ func _validateSignedTx(
 	if tx.Nonce() != nonce {
 		return false, fmt.Errorf("nonce mismatch: got %d, want %d (pending nonce from chain)", tx.Nonce(), nonce)
 	}
-	return validateTxData(tx, expectedNamehash, expectedFrom)
+	return validateTxData(client, tx, expectedNamehash, expectedFrom)
 }
 
-func validateTxData(tx types.Transaction, expectedNamehash []byte, signerAddress common.Address) (bool, error) {
+func getBytesArg(arg interface{}) ([]byte, bool) {
+	switch v := arg.(type) {
+	case [32]byte:
+		var value [32]byte
+		copy(value[:], v[:])
+		return value[:], true
+	case []byte:
+		value := make([]byte, len(v))
+		copy(value, v)
+		return value, true
+	default:
+		return nil, false
+	}
+}
+
+func validateTxData(client *ethclient.Client, tx types.Transaction, expectedNamehash []byte, signerAddress common.Address) (bool, error) {
 	parsedABI := LoadABI()
 	txData := tx.Data()
 	chainID := int(tx.ChainId().Int64())
@@ -350,18 +368,27 @@ func validateTxData(tx types.Transaction, expectedNamehash []byte, signerAddress
 	} else if expiresAt <= timestamp {
 		return false, fmt.Errorf("args[2] is less than or equal to args[3] in signedTx")
 	}
+	// check that timestamp is not in the future and not too far in the past (MAX_TIME_DRIFT is 15mins)
+	time_now := uint64(time.Now().Unix())
+	if timestamp > time_now {
+		return false, fmt.Errorf("timestamp is in the future")
+	} else if timestamp < time_now-uint64(12*60) { // 12 minutes in seconds
+		return false, fmt.Errorf("timestamp is too far in the past")
+	}
 
 	digest, err := GetDigest(namehash, resolver, expiresAt, timestamp, chainID, *contractAddr)
 	if err != nil {
 		return false, fmt.Errorf("Cannot compute digest %v", err)
 	}
-	// Fix v value if needed
+
+	// Ecrecover signer
+	// adjust v value if necessary to be either 0 or 1
 	if len(sig) == 65 && sig[64] >= 27 {
 		sig[64] -= 27
 	}
-	// Ecrecover signer
 	pubKeyBytes, err := crypto.Ecrecover(digest, sig)
 
+	// negate
 	if err != nil {
 		return false, fmt.Errorf("Failed to ecrecover pubkey from signature: %v", err)
 	}
@@ -374,35 +401,28 @@ func validateTxData(tx types.Transaction, expectedNamehash []byte, signerAddress
 		return false, fmt.Errorf("Signature does not match expected signer: got %s, want %s", recoveredAddr.Hex(), signerAddress.Hex())
 	}
 
-	return true, nil
+	// Try call the contract with the provided data
+	return simulateTx(client, contractAddr, txData, nil)
 }
 
-func getBytesArg(arg interface{}) ([]byte, bool) {
-	var value []byte
-	switch v := arg.(type) {
-	case [32]byte:
-		value = v[:]
-	case []byte:
-		value = v
-	default:
-		return nil, false
-	}
-	return value, true
-}
+func simulateTx(client *ethclient.Client, to *common.Address, data []byte, blockNumber *big.Int) (bool, error) {
+	// try to get the revert reason
+	revertReason, err := client.CallContract(context.Background(), ethereum.CallMsg{
+		To:   to,
+		Data: data,
+	}, blockNumber)
 
-func ValidateSignedTx(record utils.Record) (bool, error) {
-	tx, err := decodeSignedTx(record.GetSignedTx())
 	if err != nil {
-		return false, fmt.Errorf("Invalid signedTx, %v", err)
+		return false, fmt.Errorf("transaction reverted with reason: %w", err)
+	} else if len(revertReason) > 0 {
+		return false, fmt.Errorf("transaction reverted with reason: %s", string(revertReason))
 	}
-	valid, err := _validateSignedTx(tx, record.GetSigner(), record.GetNamehash())
-	if err != nil || !valid {
-		return false, fmt.Errorf("signedTx validation failed, %v", err)
-	}
-	return valid, nil
+	return true, nil
+
 }
 
 // SubmitSignedTx submits a signed transaction to the blockchain and returns the tx hash
+// If the transaction is reverted, returns the revert reason as part of the error
 func SubmitSignedTx(signedTx []byte) (string, error) {
 	rpcURL := os.Getenv("EVM_RPC_URL")
 	if rpcURL == "" {
@@ -422,5 +442,39 @@ func SubmitSignedTx(signedTx []byte) (string, error) {
 		return "", fmt.Errorf("failed to send raw transaction: %w", err)
 	}
 
+	isPending := true
+	var tx *types.Transaction
+	// Wait for the transaction to be mined
+	for isPending {
+		time.Sleep(2 * time.Second) // Wait for 2 seconds before checking again
+		// check the result of the transaction using the transaction hash, avoid using := to avoid shadowing
+		tx, isPending, err = client.TransactionByHash(context.Background(), txHash)
+		if err != nil {
+			return "", fmt.Errorf("failed to get transaction by hash: %w", err)
+		}
+		if isPending {
+			return "", fmt.Errorf("transaction is still pending: %s", txHash.Hex())
+		}
+		if tx == nil {
+			return "", fmt.Errorf("transaction not found: %s", txHash.Hex())
+		}
+	}
+
+	// Check if the transaction was reverted
+	receipt, err := client.TransactionReceipt(context.Background(), txHash)
+	if receipt.Status == 0 {
+		// Transaction was reverted, try to get the revert reason
+		reverted, err := simulateTx(client, tx.To(), tx.Data(), receipt.BlockNumber)
+		if err != nil {
+			return "", fmt.Errorf("transaction reverted with error: %w", err)
+		}
+		if reverted {
+			return "", fmt.Errorf("transaction reverted without a reason")
+		}
+		return "", fmt.Errorf("transaction reverted with an unknown reason")
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get transaction receipt: %w", err)
+	}
 	return txHash.Hex(), nil
 }

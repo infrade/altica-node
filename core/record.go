@@ -190,12 +190,12 @@ func (r *Record) IsExpired() bool {
 // Helper to prepare deterministic signing payload
 func (r *Record) serializeForSigning() ([]byte, error) {
 	type unsignedRecord struct {
-		Domain string        `json:"domain"`
-		TTL    time.Duration `json:"ttl"`
+		Domain string `json:"domain"`
+		// TTL    time.Duration `json:"ttl"`
 	}
 	unsigned := unsignedRecord{
 		Domain: r.Domain,
-		TTL:    r.TTL,
+		// TTL:    r.TTL,
 	}
 	return json.Marshal(unsigned)
 }

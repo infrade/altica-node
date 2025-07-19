@@ -115,6 +115,12 @@ func (vm *VotingManager) periodicDecisionMaking() {
 
 // processPendingRecords processes all pending records
 func (vm *VotingManager) processPendingRecords() {
+	// time="2025-07-19T01:37:11+01:00" level=info msg="pending domains" domains="[example.alt]"
+	// time="2025-07-19T01:37:11+01:00" level=error msg="Failed to make decision" domain=example.alt error="failed to submit signed transaction: failed to send raw transaction: nonce too low"
+	// time="2025-07-19T01:37:26+01:00" level=info msg="pending domains" domains="[example.alt]"
+	// time="2025-07-19T01:37:26+01:00" level=error msg="Failed to make decision" domain=example.alt error="failed to submit signed transaction: failed to send raw transaction: nonce too low"
+	// TODO: remove rejected records from pending records in DHT
+
 	// Get only pending records from DHT
 	domains, ok := vm.store.GetPendingDomains()
 	if !ok {

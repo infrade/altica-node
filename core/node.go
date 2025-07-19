@@ -57,7 +57,7 @@ type Node struct {
 
 // Bootstrap nodes
 var bootstrapPeers = []string{
-	"/dns4/0.tcp.eu.ngrok.io/tcp/13057/p2p/12D3KooWH6hNr8GtqXpmpB7oPshmKnA58G7UuYR5YXdnJxEAoT5s",
+	"/dns4/4.tcp.eu.ngrok.io/tcp/12305/p2p/12D3KooWH6hNr8GtqXpmpB7oPshmKnA58G7UuYR5YXdnJxEAoT5s",
 }
 
 type PermissiveValidator struct{}

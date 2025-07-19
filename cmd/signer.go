@@ -36,13 +36,7 @@ func SignDomain(domain string, expiresIn int, pk ecdsa.PrivateKey) {
 	fmt.Printf("Signer Address: %s\n", signerAddr.Hex())
 	fmt.Printf("Signature: 0x%s\n", hex.EncodeToString(record.Signature))
 	fmt.Printf("Public Key: 0x%s\n", hex.EncodeToString(record.PublicKey))
-
-	// Verify the signature
-	if record.Verify() {
-		fmt.Println("\nSignature verification: SUCCESS")
-	} else {
-		fmt.Println("\nSignature verification: FAILED")
-	}
+	fmt.Printf("Namehash: 0x%x\n", record.Namehash)
 
 	// Print the full record as JSON
 	recordJSON, err := json.MarshalIndent(record, "", "  ")
