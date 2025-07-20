@@ -37,6 +37,7 @@ type EventListener struct {
 	contractAddr common.Address
 	fromBlock    uint64
 	store        utils.RecordStore
+	logTopics    map[string]common.Hash
 }
 
 // loadABI loads the ABI from the contracts output folder
@@ -112,6 +113,10 @@ func NewEventListener(store utils.RecordStore) (*EventListener, error) {
 
 	contract := bind.NewBoundContract(common.HexToAddress(contractAddr), contract_abi, client, client, client)
 
+	logTopics := map[string]common.Hash{
+		"submittedBinding": crypto.Keccak256Hash([]byte("SubmittedBinding(bytes32,address,uint64)")),
+		"nameBound":        crypto.Keccak256Hash([]byte("NameBound(bytes32,address,uint64)")),
+	}
 	return &EventListener{
 		client:       client,
 		contract:     contract,
@@ -119,6 +124,7 @@ func NewEventListener(store utils.RecordStore) (*EventListener, error) {
 		contractAddr: common.HexToAddress(contractAddr),
 		fromBlock:    deploymentBlock,
 		store:        store,
+		logTopics:    logTopics,
 	}, nil
 }
 
@@ -135,12 +141,13 @@ func (l *EventListener) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get last synced block: %w", err)
 	}
+
 	query := ethereum.FilterQuery{
 		Addresses: []common.Address{l.contractAddr},
 		FromBlock: big.NewInt(int64(lastSyncedBlock)),
 		ToBlock:   big.NewInt(int64(latestBlock)),
 		Topics: [][]common.Hash{
-			{crypto.Keccak256Hash([]byte("SubmittedBinding(bytes32,address,uint64)"))},
+			{l.logTopics["submittedBinding"], l.logTopics["nameBound"]},
 		},
 	}
 
@@ -150,11 +157,8 @@ func (l *EventListener) Start(ctx context.Context) error {
 			l.log.WithError(err).Error("Failed to filter historical logs")
 		}
 		for _, log := range historyLogs {
-			if err := l.handleSubmittedBinding(log); err != nil {
-				l.log.WithError(err).Error("Failed to handle historical SubmittedBinding event")
-			}
+			l.handleLogEvent(log, "historical")
 		}
-		l.setLastSyncedBlock(latestBlock)
 	}
 
 	// Now subscribe to new logs from the latest block onward
@@ -179,9 +183,7 @@ func (l *EventListener) Start(ctx context.Context) error {
 					continue
 				}
 			case log := <-logs:
-				if err := l.handleSubmittedBinding(log); err != nil {
-					l.log.WithError(err).Error("Failed to handle SubmittedBinding event")
-				}
+				l.handleLogEvent(log, "fresh")
 			case <-ctx.Done():
 				return
 			}
@@ -192,12 +194,25 @@ func (l *EventListener) Start(ctx context.Context) error {
 }
 
 func (l *EventListener) Stop() {
-	// Implement any necessary cleanup logic here
 	l.log.Info("Stopping EventListener")
-	// For example, you might want to close the client connection or unsubscribe from logs
 	if l.client != nil {
 		l.client.Close()
 	}
+}
+
+func (l *EventListener) handleLogEvent(log types.Log, desc string) error {
+	switch log.Topics[0] {
+	case l.logTopics["submittedBinding"]:
+		if err := l.handleSubmittedBinding(log); err != nil {
+			l.log.WithError(err).Errorf("Failed to handle SubmittedBinding event (%s)", desc)
+		}
+	case l.logTopics["nameBound"]:
+		if err := l.handleNameBound(log); err != nil {
+			l.log.WithError(err).Errorf("Failed to handle NameBound event (%s)", desc)
+		}
+	}
+	l.setLastSyncedBlock(uint64(log.BlockNumber))
+	return nil
 }
 
 // handleSubmittedBinding processes a SubmittedBinding event
@@ -275,7 +290,26 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 			"accepted": accepted,
 		}).Info("Called oracleDecideSigner")
 	}
-	l.setLastSyncedBlock(uint64(log.BlockNumber))
+	return nil
+}
+
+// Add this handler for NameBound
+func (l *EventListener) handleNameBound(log types.Log) error {
+	var event struct {
+		Namehash  [32]byte
+		Resolver  common.Address
+		ExpiresAt uint64
+	}
+	err := l.contract.UnpackLog(&event, "NameBound", log)
+	if err != nil {
+		return fmt.Errorf("failed to unpack NameBound event: %w", err)
+	}
+	l.log.WithFields(logrus.Fields{
+		"namehash":  hex.EncodeToString(event.Namehash[:]),
+		"resolver":  event.Resolver.Hex(),
+		"expiresAt": event.ExpiresAt,
+		"block":     log.BlockNumber,
+	}).Info("NameBound event received")
 	return nil
 }
 

@@ -107,6 +107,8 @@ func main() {
 			fmt.Printf("Failed to start EVM Listener, %s", err)
 			os.Exit(1)
 		}
+		defer evmListener.Stop()
+		fmt.Println("EVM Listener started successfully")
 	} else {
 		fmt.Println("Skipping EVM Listener")
 	}
