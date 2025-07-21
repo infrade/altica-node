@@ -1,7 +1,7 @@
 package evm
 
 import (
-	"altica_node/utils"
+	interfaces "altica_node/utils"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -36,7 +36,8 @@ type EventListener struct {
 	log          *logrus.Logger
 	contractAddr common.Address
 	fromBlock    uint64
-	store        utils.RecordStore
+	gossip       interfaces.GossipManager // Optional, can be nil if not used
+	store        interfaces.RecordStore
 	logTopics    map[string]common.Hash
 }
 
@@ -80,7 +81,7 @@ func LoadABI() abi.ABI {
 
 // NewEventListener creates a new event listener
 // Accepts a RecordStore as a parameter
-func NewEventListener(store utils.RecordStore) (*EventListener, error) {
+func NewEventListener(store interfaces.RecordStore, gossip interfaces.GossipManager) (*EventListener, error) {
 	// Get RPC URL from environment
 	rpcURL := os.Getenv("EVM_RPC_URL")
 	if rpcURL == "" {
@@ -123,6 +124,7 @@ func NewEventListener(store utils.RecordStore) (*EventListener, error) {
 		log:          logrus.New(),
 		contractAddr: common.HexToAddress(contractAddr),
 		fromBlock:    deploymentBlock,
+		gossip:       gossip,
 		store:        store,
 		logTopics:    logTopics,
 	}, nil
@@ -229,7 +231,7 @@ func (l *EventListener) handleSubmittedBinding(log types.Log) error {
 		return fmt.Errorf("failed to unpack event: %w", err)
 	}
 
-	var record utils.Record
+	var record interfaces.Record
 	var found bool
 	const maxRetries = 4
 	for attempt := 1; !found && attempt <= maxRetries; attempt++ {
@@ -299,18 +301,32 @@ func (l *EventListener) handleNameBound(log types.Log) error {
 		Namehash  [32]byte
 		Resolver  common.Address
 		ExpiresAt uint64
+		ChainID   uint64
+		EventID   string // e.g. chainID:namehash:blockNumber
 	}
 	err := l.contract.UnpackLog(&event, "NameBound", log)
 	if err != nil {
 		return fmt.Errorf("failed to unpack NameBound event: %w", err)
 	}
+	// set the chain ID to the chain we're connected to
+	chainID, err := l.client.ChainID(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to get chain ID: %w", err)
+	}
+	event.ChainID = chainID.Uint64()
+	event.EventID = fmt.Sprintf("%d:%s:%d", event.ChainID, hex.EncodeToString(event.Namehash[:]), log.BlockNumber)
 	l.log.WithFields(logrus.Fields{
-		"namehash":  hex.EncodeToString(event.Namehash[:]),
+		"eventID":   event.EventID,
 		"resolver":  event.Resolver.Hex(),
 		"expiresAt": event.ExpiresAt,
-		"block":     log.BlockNumber,
 	}).Info("NameBound event received")
-	return nil
+	return l.gossip.PublishNameBound(interfaces.NameBoundEvent{
+		Namehash:  event.Namehash,
+		Resolver:  event.Resolver,
+		ExpiresAt: event.ExpiresAt,
+		ChainID:   event.ChainID,
+		EventID:   event.EventID,
+	})
 }
 
 // getTransactOpts returns transaction options for contract calls
@@ -371,5 +387,5 @@ func (l *EventListener) setLastSyncedBlock(block uint64) error {
 }
 
 func getEVMListenerDBPath() string {
-	return filepath.Join(utils.GetDataDir(), "evm_listener")
+	return filepath.Join(interfaces.GetDataDir(), "evm_listener")
 }

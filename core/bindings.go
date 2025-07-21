@@ -5,7 +5,7 @@ import (
 )
 
 // ChainIDToBlockchainName maps EVM chain IDs to their blockchain names
-var ChainIDToBlockchainName = map[int]string{
+var ChainIDToBlockchainName = map[uint]string{
 	1:          "ethereum",
 	56:         "bsc",
 	137:        "polygon",
@@ -24,10 +24,10 @@ var ChainIDToBlockchainName = map[int]string{
 }
 
 type Binding struct {
-	Addresses   map[int]string `json:"addresses"`
-	ContentHash string         `json:"contentHash"`
-	Text        string         `json:"text"`
-	A           string         `json:"A"`
+	Addresses   map[uint]string `json:"addresses"`
+	ContentHash string          `json:"contentHash"`
+	Text        string          `json:"text"`
+	A           string          `json:"A"`
 }
 
 // ValidateAddressesChainIDs checks that all keys in Addresses are valid chain IDs

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -61,12 +60,12 @@ func (p *DomainRegisterParams) Validate() error {
 	return nil
 }
 
-func hex2Bytes(s string) []byte {
+func hex2Bytes(s string) ([]byte, error) {
 	result, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
 	if err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("invalid hex string: %w", err)
 	}
-	return result
+	return result, nil
 }
 
 // Record management handlers
@@ -106,9 +105,19 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 		p.TTL = time.Hour * 1
 	}
 
-	sigBytes := hex2Bytes(p.Signature)
-	pubKeyBytes := hex2Bytes(p.PublicKey)
-	signedTxBytes := hex2Bytes(p.SignedTx)
+	sigBytes, err := hex2Bytes(p.Signature)
+	if err != nil {
+		return nil, fmt.Errorf("invalid signature: %w", err)
+	}
+	pubKeyBytes, err := hex2Bytes(p.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid publicKey: %w", err)
+	}
+	signedTxBytes, err := hex2Bytes(p.SignedTx)
+	if err != nil {
+		return nil, fmt.Errorf("invalid signedTx: %w", err)
+	}
+
 	if len(sigBytes) == 0 || len(pubKeyBytes) == 0 || len(signedTxBytes) == 0 {
 		return nil, fmt.Errorf("signature, publicKey and signedTx must be provided in hex format")
 	}
@@ -137,44 +146,46 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 }
 
 // Mapping addition handler (wallet/address)
+// wallet add should be initiated from the blockchain for EVM, rewrite this later
 func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error) {
-	var p RecordAddParams
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
-	}
+	// var p RecordAddParams
+	// if err := json.Unmarshal(params, &p); err != nil {
+	// 	return nil, fmt.Errorf("invalid params: %w", err)
+	// }
 
-	// Get the latest version of the record
-	record, err := s.node.Store.GetLatestRecord(p.Domain)
-	if err != nil {
-		return nil, fmt.Errorf("domain not found: %w", err)
-	}
+	// // Get the latest version of the record
+	// record, err := s.node.Store.GetLatestRecord(p.Domain)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("domain not found: %w", err)
+	// }
 
-	// Validate proof for the chain
-	if !validateProof(p.Chain, p.Address, p.Proof) {
-		return nil, fmt.Errorf("invalid proof for address on chain %d", p.Chain)
-	}
+	// // Validate proof for the chain
+	// if !validateProof(p.Chain, p.Address, p.Proof) {
+	// 	return nil, fmt.Errorf("invalid proof for address on chain %d", p.Chain)
+	// }
 
-	// Update bindings and metadata
-	record.Bindings.Addresses[p.Chain] = p.Address
-	if record.Metadata == nil {
-		record.Metadata = make(map[string]interface{})
-	}
-	if record.Metadata["proofs"] == nil {
-		record.Metadata["proofs"] = map[string]interface{}{}
-	}
-	proofs := record.Metadata["proofs"].(map[int]interface{})
-	proofs[p.Chain] = p.Proof
-	record.Metadata["proofs"] = proofs
-	record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	// // Update bindings and metadata
+	// record.Bindings.Addresses[p.Chain] = p.Address
+	// if record.Metadata == nil {
+	// 	record.Metadata = make(map[string]interface{})
+	// }
+	// if record.Metadata["proofs"] == nil {
+	// 	record.Metadata["proofs"] = map[string]interface{}{}
+	// }
+	// proofs := record.Metadata["proofs"].(map[int]interface{})
+	// proofs[p.Chain] = p.Proof
+	// record.Metadata["proofs"] = proofs
+	// record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 
-	// Save updated record
-	if err := s.node.Store.Add(record); err != nil {
-		return nil, fmt.Errorf("failed to update record: %w", err)
-	}
-	if err := s.node.PublishRecord(record); err != nil {
-		return nil, fmt.Errorf("failed to publish update: %w", err)
-	}
-	return record, nil
+	// // Save updated record
+	// if err := s.node.Store.Add(record); err != nil {
+	// 	return nil, fmt.Errorf("failed to update record: %w", err)
+	// }
+	// if err := s.node.PublishRecord(record); err != nil {
+	// 	return nil, fmt.Errorf("failed to publish update: %w", err)
+	// }
+	// return record, nil
+	return nil, fmt.Errorf("record add not implemented yet")
 }
 
 func validateProof(chain int, address string, proof map[string]interface{}) bool {

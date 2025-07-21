@@ -67,6 +67,10 @@ func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte
 	// Initialize versioning
 	record.Versions = make(map[string]RecordVersion)
 	record.Metadata["created_at"] = time.Now().UTC().Format(time.RFC3339)
+	// Ensure Binding is initialized if it's a map type
+	if record.Bindings.Addresses == nil {
+		record.Bindings.Addresses = make(map[uint]string)
+	}
 	signer, err := record.GetSignerAddress()
 	if err != nil {
 		return nil, fmt.Errorf("Cannot get signer address")

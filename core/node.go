@@ -1,6 +1,8 @@
 package core
 
 import (
+	"altica_node/contracts/evm"
+	interfaces "altica_node/utils"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -13,7 +15,6 @@ import (
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pstoreds "github.com/libp2p/go-libp2p-peerstore/pstoreds"
-	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	record "github.com/libp2p/go-libp2p-record"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	host "github.com/libp2p/go-libp2p/core/host"
@@ -45,14 +46,13 @@ type NodeOptions struct {
 }
 
 type Node struct {
-	Host         host.Host
-	DHT          *dht.IpfsDHT
-	PubSub       *pubsub.PubSub
-	RecordsTopic *pubsub.Topic
-	Context      context.Context
-	log          *logrus.Logger
-	Store        *RecordStore
-	lastSync     time.Time
+	Host     host.Host
+	DHT      *dht.IpfsDHT
+	Context  context.Context
+	log      *logrus.Logger
+	Gossip   *GossipManager // For pubsub and gossips
+	Store    *RecordStore
+	lastSync time.Time
 }
 
 // Bootstrap nodes
@@ -146,28 +146,21 @@ func NewNode(ctx context.Context, opts NodeOptions) (*Node, error) {
 		return nil, fmt.Errorf("failed to create altica DHT: %w", err)
 	}
 
-	// Create pubsub
-	pubs, err := pubsub.NewGossipSub(ctx, h)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pubsub: %w", err)
-	}
-
-	// Join the records topic once and reuse
-	recordsTopic, err := pubs.Join("altica-records")
-	if err != nil {
-		return nil, fmt.Errorf("failed to join records topic: %w", err)
-	}
-
 	store := NewRecordStore(recordsDs, alticaDHT, ctx, h.ID().String(), opts.PrivateKey)
-	node := &Node{
-		Host:         h,
-		DHT:          alticaDHT,
-		PubSub:       pubs,
-		RecordsTopic: recordsTopic,
-		Context:      ctx,
-		log:          logger,
-		Store:        store,
+	gossipManager, err := NewGossipManager(ctx, h, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gossip manager: %w", err)
 	}
+
+	node := &Node{
+		Host:    h,
+		DHT:     alticaDHT,
+		Gossip:  gossipManager,
+		Context: ctx,
+		log:     logger,
+		Store:   store,
+	}
+	gossipManager.Node = node
 
 	if !hasRecords {
 		node.lastSync = time.Time{}
@@ -262,41 +255,36 @@ func (n *Node) Bootstrap() error {
 	}()
 
 	_ = mdns.NewMdnsService(n.Host, "altica-mdns", n)
-
-	// Start record synchronization
-	if err := n.StartRecordSync(); err != nil {
-		return fmt.Errorf("failed to start record sync: %w", err)
-	}
-
+	n.Gossip.Start()
 	return nil
 }
 
-func (n *Node) SubscribeToRecords() error {
-	topic, err := n.PubSub.Join("altica-dns-records")
-	fmt.Println("Joining topic:", topic)
-	if err != nil {
-		return fmt.Errorf("failed to join pubsub topic: %w", err)
-	}
+// func (n *Node) SubscribeToRecords() error {
+// 	topic, err := n.PubSub.Join("altica-dns-records")
+// 	fmt.Println("Joining topic:", topic)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to join pubsub topic: %w", err)
+// 	}
 
-	sub, err := topic.Subscribe()
-	if err != nil {
-		return fmt.Errorf("failed to subscribe to topic: %w", err)
-	}
+// 	sub, err := topic.Subscribe()
+// 	if err != nil {
+// 		return fmt.Errorf("failed to subscribe to topic: %w", err)
+// 	}
 
-	go func() {
-		for {
-			msg, err := sub.Next(n.Context)
-			if err != nil {
-				fmt.Println("Error reading message:", err)
-				continue
-			}
-			fmt.Printf("Record update from %s: %s\n", msg.GetFrom().String(), string(msg.Data))
-			// TODO: handle/verify the record data
-		}
-	}()
+// 	go func() {
+// 		for {
+// 			msg, err := sub.Next(n.Context)
+// 			if err != nil {
+// 				fmt.Println("Error reading message:", err)
+// 				continue
+// 			}
+// 			fmt.Printf("Record update from %s: %s\n", msg.GetFrom().String(), string(msg.Data))
+// 			// TODO: handle/verify the record data
+// 		}
+// 	}()
 
-	return nil
-}
+// 	return nil
+// }
 
 // HandlePeerFound connects to peers discovered via mDNS. Implements mdns.Notifee
 func (n *Node) HandlePeerFound(pi peer.AddrInfo) {
@@ -349,4 +337,88 @@ func (n *Node) promptUserConfirmation(prompt string) bool {
 // getID returns the node's peer ID as a string
 func (n *Node) getID() string {
 	return n.Host.ID().String()
+}
+
+// PublishRecord publishes a record update to the network
+func (n *Node) PublishRecord(record *Record) error {
+	msg := interfaces.RecordMessage{
+		Type:      "registration_intent",
+		Records:   []interfaces.Record{record},
+		Version:   record.Version,
+		StateRoot: n.Store.computeStateRoot(),
+		PeerID:    n.getID(),
+	}
+	err := n.Gossip.PublishRecordMessage(msg)
+	if err != nil {
+		n.log.WithError(err).Error("Failed to publish record message")
+		return fmt.Errorf("failed to publish record message: %w", err)
+	}
+	n.log.WithFields(logrus.Fields{
+		"domain": record.Domain}).Info("Published record update")
+	return nil
+}
+
+func (n *Node) handleRegistrationIntent(msg interfaces.RecordMessage) {
+	// skip if node is the publisher
+	for _, entry := range msg.Records {
+		// Each peer validates the record
+		valid := false
+		domain := entry.GetDomain()
+		record, found := n.Store.Get(domain)
+		if !found {
+			n.log.WithField("record", domain).Error("record not found")
+			continue
+		} else if record.Status != "pending" {
+			n.log.Error("Record is not pending")
+		} else if !record.Verify() {
+			n.log.Error("Invalid record signature")
+		}
+
+		valid, err := evm.ValidateSignedTx(record)
+
+		if err != nil {
+			n.log.WithError(err).Error("Failed to validate signed transaction")
+		} else if !valid {
+			n.log.Error("Signed transaction validation failed")
+		} else {
+			n.log.WithFields(logrus.Fields{
+				"domain": record.Domain,
+				"valid":  valid,
+			}).Info("Record and signedTx are valid")
+		}
+
+		// Submit vote using voting manager
+		if n.Store.votingManager != nil {
+			if err := n.Store.votingManager.SubmitVote(record.Domain, valid); err != nil {
+				n.log.WithError(err).Error("Failed to submit vote")
+			}
+
+		}
+	}
+}
+
+func (n *Node) handleNameBoundEvent(evt interfaces.NameBoundEvent) {
+	n.log.WithFields(logrus.Fields{
+		"eventID":   evt.EventID,
+		"resolver":  evt.Resolver,
+		"expiresAt": evt.ExpiresAt,
+	}).Info("Handling NameBound event")
+
+	if err := n.Store.BindAddressResolver(evt); err != nil {
+		n.log.WithError(err).Error("Failed to store NameBound event")
+	}
+}
+
+func (n *Node) Close() error {
+	n.log.Info("Closing Node")
+	if err := n.Gossip.Close(); err != nil {
+		n.log.WithError(err).Error("Failed to close GossipManager")
+	}
+	if err := n.Host.Close(); err != nil {
+		n.log.WithError(err).Error("Failed to close libp2p host")
+	}
+	if err := n.DHT.Close(); err != nil {
+		n.log.WithError(err).Error("Failed to close DHT")
+	}
+	return nil
 }

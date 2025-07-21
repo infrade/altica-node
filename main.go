@@ -72,12 +72,13 @@ func main() {
 		fmt.Println("Error bootstrapping:", err)
 		os.Exit(1)
 	}
+	defer node.Close()
 
-	err = node.SubscribeToRecords()
-	if err != nil {
-		fmt.Println("Error subscribing to records:", err)
-		os.Exit(1)
-	}
+	// err = node.SubscribeToRecords()
+	// if err != nil {
+	// 	fmt.Println("Error subscribing to records:", err)
+	// 	os.Exit(1)
+	// }
 
 	// Start RPC server
 	rpcServer := rpc.NewRPCServer(node)
@@ -96,7 +97,7 @@ func main() {
 	if startListener == "true" {
 		fmt.Println("Starting EVM Listener")
 		// Start EVM contract event listener
-		evmListener, err := evm.NewEventListener(node.Store)
+		evmListener, err := evm.NewEventListener(node.Store, node.Gossip)
 		if err != nil {
 			fmt.Printf("Cannot start EVM Listener, %s", err)
 			os.Exit(1)

@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
-	"log"
 	"math/big"
 	"os"
 	"strconv"
@@ -184,14 +183,14 @@ func decodeSignedTx(signedTx []byte) (types.Transaction, error) {
 		// Typed transaction (EIP-1559)
 		var inner types.DynamicFeeTx
 		if err := rlp.DecodeBytes(signedTx[1:], &inner); err != nil {
-			log.Fatalf("RLP decode error: %v", err)
+			return types.Transaction{}, fmt.Errorf("RLP decode error: %v", err)
 		}
 		tx = types.NewTx(&inner)
 	} else {
 		// Legacy transaction (EIP-155)
 		tx = new(types.Transaction)
 		if err := tx.UnmarshalBinary(signedTx); err != nil {
-			log.Fatalf("Unmarshal error: %v", err)
+			return types.Transaction{}, fmt.Errorf("Unmarshal error: %v", err)
 		}
 	}
 	return *tx, nil

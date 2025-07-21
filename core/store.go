@@ -3,6 +3,7 @@ package core
 import (
 	"altica_node/contracts/evm"
 	"altica_node/utils"
+	interfaces "altica_node/utils"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -45,7 +47,6 @@ type RecordStore struct {
 	filter        *bloom.BloomFilter // Bloom filter for fast lookups
 	votingManager *VotingManager     // Added for voting functionality
 	privKey       kyber.Scalar       // Node's private key for voting
-	syncManager   *SyncManager       // Sync manager for record synchronization
 }
 
 // convertCryptoPrivKeyToKyber converts a crypto private key to a Kyber scalar
@@ -107,9 +108,6 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 			store.votingManager = votingManager
 		}
 	}
-
-	// Initialize sync manager
-	// store.syncManager = NewSyncManager(store)
 
 	// Initial sync from highest version peer
 	go func() {
@@ -1042,4 +1040,37 @@ func (s *RecordStore) GetAndSubmitSignedTx(domain string) (string, error) {
 	}
 
 	return evm.SubmitSignedTx(record.SignedTx)
+}
+
+func (s *RecordStore) computeStateRoot() []byte {
+	hash := sha256.New()
+	records := s.List()
+
+	// Sort records by domain for consistent hashing
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Domain < records[j].Domain
+	})
+
+	for _, record := range records {
+		data, _ := record.Serialize()
+		hash.Write(data)
+	}
+
+	return hash.Sum(nil)
+}
+
+func (s *RecordStore) BindAddressResolver(evt interfaces.NameBoundEvent) error {
+	// Get the record
+	record, found := s.GetByNamehash(evt.Namehash[:])
+	if !found {
+		return fmt.Errorf("record not found for domain: %s", hex.EncodeToString(evt.Namehash[:]))
+	}
+	record.(*Record).Bindings.Addresses[uint(evt.ChainID)] = evt.Resolver.Hex()
+
+	// Save the updated record
+	if err := s.SaveRecord(*record.(*Record)); err != nil {
+		return fmt.Errorf("failed to save updated record: %w", err)
+	}
+
+	return nil
 }
