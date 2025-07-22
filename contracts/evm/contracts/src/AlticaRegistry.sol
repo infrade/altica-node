@@ -44,6 +44,10 @@ contract AlticaRegistry is
     );
     event SignerBound(bytes32 indexed namehash, address indexed signer);
 
+    constructor() {
+        initialize();
+    }
+
     function initialize() public initializer {
         BIND_TYPEHASH = keccak256(
             "SubmitBinding(bytes32 namehash,address resolver,uint64 expiresAt,uint64 timestamp)"

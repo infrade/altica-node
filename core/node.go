@@ -2,6 +2,7 @@ package core
 
 import (
 	"altica_node/contracts/evm"
+	"altica_node/utils"
 	interfaces "altica_node/utils"
 	"context"
 	"fmt"
@@ -341,6 +342,7 @@ func (n *Node) getID() string {
 
 // PublishRecord publishes a record update to the network
 func (n *Node) PublishRecord(record *Record) error {
+	defer utils.TraceAuto()()
 	msg := interfaces.RecordMessage{
 		Type:      "registration_intent",
 		Records:   []interfaces.Record{record},
@@ -350,7 +352,8 @@ func (n *Node) PublishRecord(record *Record) error {
 	}
 	err := n.Gossip.PublishRecordMessage(msg)
 	if err != nil {
-		n.log.WithError(err).Error("Failed to publish record message")
+		n.log.WithError(err).Error("Failed to publish record message, rejecting record")
+		_ = n.Store.RejectRecord(record.GetDomain())
 		return fmt.Errorf("failed to publish record message: %w", err)
 	}
 	n.log.WithFields(logrus.Fields{

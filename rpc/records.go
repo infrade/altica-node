@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"altica_node/utils"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -60,10 +61,18 @@ func (p *DomainRegisterParams) Validate() error {
 	return nil
 }
 
-func hex2Bytes(s string) ([]byte, error) {
-	result, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid hex string: %w", err)
+func hex2Bytes(s ...string) ([][]byte, error) {
+	defer utils.TraceAuto()()
+	if len(s) == 0 {
+		return nil, fmt.Errorf("empty hex string")
+	}
+	result := make([][]byte, len(s))
+	for i, hexStr := range s {
+		bytes, err := hex.DecodeString(strings.TrimPrefix(hexStr, "0x"))
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex string %q: %w", hexStr, err)
+		}
+		result[i] = bytes
 	}
 	return result, nil
 }
@@ -85,6 +94,7 @@ func (s *RPCServer) handleDomainGet(params json.RawMessage) (interface{}, error)
 
 // Domain registration handler
 func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, error) {
+	defer utils.TraceAuto()()
 	var p DomainRegisterParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -105,18 +115,13 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 		p.TTL = time.Hour * 1
 	}
 
-	sigBytes, err := hex2Bytes(p.Signature)
+	decoded, err := hex2Bytes(p.Signature, p.PublicKey, p.SignedTx)
 	if err != nil {
-		return nil, fmt.Errorf("invalid signature: %w", err)
+		return nil, fmt.Errorf("%w", err)
 	}
-	pubKeyBytes, err := hex2Bytes(p.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid publicKey: %w", err)
-	}
-	signedTxBytes, err := hex2Bytes(p.SignedTx)
-	if err != nil {
-		return nil, fmt.Errorf("invalid signedTx: %w", err)
-	}
+	sigBytes := decoded[0]
+	pubKeyBytes := decoded[1]
+	signedTxBytes := decoded[2]
 
 	if len(sigBytes) == 0 || len(pubKeyBytes) == 0 || len(signedTxBytes) == 0 {
 		return nil, fmt.Errorf("signature, publicKey and signedTx must be provided in hex format")
@@ -138,10 +143,7 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 	if err := s.node.Store.Add(record); err != nil {
 		return nil, fmt.Errorf("failed to register domain: %w", err)
 	}
-	if err := s.node.PublishRecord(record); err != nil {
-		_ = s.node.Store.RejectRecord(p.Domain)
-		return nil, fmt.Errorf("failed to publish registration: %w", err)
-	}
+	go s.node.PublishRecord(record)
 	return record, nil
 }
 

@@ -149,6 +149,7 @@ func NewRecordStore(db *leveldb.Datastore, dht *dht.IpfsDHT, ctx context.Context
 
 // will try to get domain from localstore, and dht.
 func (s *RecordStore) Get(domain string) (*Record, bool) {
+	defer utils.TraceAuto()()
 	getLatestVersion := func() (*Record, bool) {
 		// If still not found, try getting latest from DHT
 		record, err := s.GetLatestRecord(domain)
@@ -214,6 +215,7 @@ func (s *RecordStore) List() []*Record {
 
 // IsDomainAvailable checks if a domain is available for registration
 func (s *RecordStore) IsDomainAvailable(domain string) (bool, error) {
+	defer utils.TraceAuto()()
 	// Check confirmed records
 	if _, found := s.Get(domain); found {
 		return false, nil
@@ -256,6 +258,7 @@ func (s *RecordStore) IsLockValid(domain, lockID string) bool {
 
 // TryAcquireLock attempts to acquire a distributed lock for a domain using DHT
 func (s *RecordStore) TryAcquireLock(domain string) (string, bool) {
+	defer utils.TraceAuto()()
 	s.lockMutex.Lock()
 	defer s.lockMutex.Unlock()
 
@@ -279,15 +282,15 @@ func (s *RecordStore) TryAcquireLock(domain string) (string, bool) {
 		return "", false
 	}
 
-	// Verify we got the lock by reading it back
-	if !s.IsLockValid(domain, lockID) {
-		s.log.WithFields(logrus.Fields{
-			"domain":   domain,
-			"lockKey":  lockKey,
-			"expected": lockID,
-		}).Error("Lock verification failed - value mismatch")
-		return "", false
-	}
+	// // Verify we got the lock by reading it back
+	// if !s.IsLockValid(domain, lockID) {
+	// 	s.log.WithFields(logrus.Fields{
+	// 		"domain":   domain,
+	// 		"lockKey":  lockKey,
+	// 		"expected": lockID,
+	// 	}).Error("Lock verification failed - value mismatch")
+	// 	return "", false
+	// }
 	// Store locally as well
 	s.pendingLocks[domain] = lockID
 	return lockID, true
@@ -318,6 +321,7 @@ func (s *RecordStore) ReleaseLock(domain, lockID string) bool {
 
 // Add adds a new record with transaction validation
 func (s *RecordStore) Add(record *Record) error {
+	defer utils.TraceAuto()()
 
 	// Check for existing records first
 	if _, found := s.Get(record.Domain); found {
@@ -341,10 +345,12 @@ func (s *RecordStore) Add(record *Record) error {
 
 	// Submit vote for the record
 	if s.votingManager != nil {
-		if err := s.votingManager.SubmitVote(record.Domain, true); err != nil {
-			s.ReleaseLock(record.Domain, lockID)
-			return fmt.Errorf("failed to submit vote: %w", err)
-		}
+		go func() {
+			if err := s.votingManager.SubmitVote(record.Domain, true); err != nil {
+				s.ReleaseLock(record.Domain, lockID)
+				// return fmt.Errorf("failed to submit vote: %w", err)
+			}
+		}()
 	}
 
 	// Return immediately, actual registration will happen after consensus
@@ -378,6 +384,7 @@ func (s *RecordStore) TryAcquireIndexLock() (string, bool) {
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
+			s.log.Info("Index lock acquisition failed, retrying in", backoff)
 			time.Sleep(backoff)
 			continue
 		}
@@ -393,6 +400,7 @@ func (s *RecordStore) TryAcquireIndexLock() (string, bool) {
 
 // SavePendingRecordToDHT saves a pending record to DHT and updates the index
 func (s *RecordStore) SavePendingRecordToDHT(record PendingRecord) error {
+	defer utils.TraceAuto()()
 	// First acquire lock on the index with backoff
 	lockID, acquired := s.TryAcquireIndexLock()
 	if !acquired {

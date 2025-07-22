@@ -1,6 +1,7 @@
 package core
 
 import (
+	"altica_node/utils"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
@@ -52,7 +53,7 @@ func (r *Record) GetNamehash() []byte {
 
 // NewRecord creates a new unsigned record
 func NewRecord(domain string, ttl time.Duration, signature []byte, pubKey []byte, signedTx []byte) (*Record, error) {
-
+	defer utils.TraceAuto()()
 	record := &Record{
 		Domain:    domain,
 		Namehash:  Namehash(domain),

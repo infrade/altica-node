@@ -4,12 +4,26 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"runtime"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
+
+func TraceAuto() func() {
+	pc, _, _, _ := runtime.Caller(1)
+	fn := runtime.FuncForPC(pc).Name()
+	start := time.Now()
+	log.Printf("→ Enter %s", fn)
+	return func() {
+		log.Printf("← Exit  %s (took %s)", fn, time.Since(start))
+	}
+}
 
 func GetDataDir() string {
 	// Setup data directory

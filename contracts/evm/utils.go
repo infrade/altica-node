@@ -239,6 +239,7 @@ func getFromAddress(tx types.Transaction) (common.Address, error) {
 }
 
 func ValidateSignedTx(record utils.Record) (bool, error) {
+	defer utils.TraceAuto()()
 	tx, err := decodeSignedTx(record.GetSignedTx())
 	if err != nil {
 		return false, fmt.Errorf("Invalid signedTx, %v", err)

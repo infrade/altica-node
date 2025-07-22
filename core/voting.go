@@ -1,6 +1,7 @@
 package core
 
 import (
+	"altica_node/utils"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,6 +178,7 @@ func makeVoteKey(domain string) string {
 
 // SubmitVote submits a vote with threshold signature
 func (vm *VotingManager) SubmitVote(domain string, decision bool) error {
+	defer utils.TraceAuto()()
 	result, err := vm.getVoteResult(domain)
 	if err != nil {
 		if !errors.Is(err, routing.ErrNotFound) {
