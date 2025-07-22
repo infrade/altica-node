@@ -320,12 +320,14 @@ func (s *RecordStore) ReleaseLock(domain, lockID string) bool {
 }
 
 // Add adds a new record with transaction validation
-func (s *RecordStore) Add(record *Record) error {
+func (s *RecordStore) Add(record *Record, knownNotFound bool) error {
 	defer utils.TraceAuto()()
 
-	// Check for existing records first
-	if _, found := s.Get(record.Domain); found {
-		return fmt.Errorf("record already exists")
+	// Only check for existing records if not already known
+	if !knownNotFound {
+		if _, found := s.Get(record.Domain); found {
+			return fmt.Errorf("record already exists")
+		}
 	}
 
 	// Try to acquire a lock

@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -80,16 +82,6 @@ func main() {
 	// 	os.Exit(1)
 	// }
 
-	// Start RPC server
-	rpcServer := rpc.NewRPCServer(node)
-	go func() {
-		addr := fmt.Sprintf(":%d", *port)
-		if err := rpcServer.Start(addr); err != nil {
-			fmt.Printf("Failed to start RPC server: %s\n", err)
-			os.Exit(1)
-		}
-	}()
-
 	fmt.Println("Altica P2P node is running with ID:", node.Host.ID())
 	fmt.Printf("RPC server listening on :%d\n", *port)
 
@@ -123,8 +115,33 @@ func main() {
 		}
 	}()
 
+	// Start pprof on a separate mux and port
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+		mux.Handle("/debug/pprof/cmdline", http.DefaultServeMux)
+		mux.Handle("/debug/pprof/profile", http.DefaultServeMux)
+		mux.Handle("/debug/pprof/symbol", http.DefaultServeMux)
+		mux.Handle("/debug/pprof/trace", http.DefaultServeMux)
+		fmt.Println("pprof listening on :6060")
+		if err := http.ListenAndServe("localhost:6060", mux); err != nil {
+			fmt.Println("pprof server error:", err)
+		}
+	}()
+
+	// Start RPC server
+	rpcServer := rpc.NewRPCServer(node)
+	go func() {
+		addr := fmt.Sprintf(":%d", *port)
+		if err := rpcServer.Start(addr); err != nil {
+			fmt.Printf("Failed to start RPC server: %s\n", err)
+			os.Exit(1)
+		}
+	}()
+
 	// Wait for interrupt
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
+
 }

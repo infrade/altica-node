@@ -104,9 +104,9 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 		return nil, fmt.Errorf("validation error: %w", err)
 	}
 
-	// TODO: refactor; make it fat model, thin view
-	available, _ := s.node.Store.IsDomainAvailable(p.Domain)
-	if !available {
+	// Only call Get once
+	_, found := s.node.Store.Get(p.Domain)
+	if found {
 		return nil, fmt.Errorf("domain is not available or locked for registration")
 	}
 
@@ -140,7 +140,8 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 		return nil, fmt.Errorf("signedTx validation failed: %w", err)
 	}
 
-	if err := s.node.Store.Add(record); err != nil {
+	// Pass knownNotFound = true to avoid redundant Get in Add
+	if err := s.node.Store.Add(record, true); err != nil {
 		return nil, fmt.Errorf("failed to register domain: %w", err)
 	}
 	go s.node.PublishRecord(record)
