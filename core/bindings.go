@@ -26,7 +26,7 @@ var ChainIDToBlockchainName = map[uint]string{
 type Binding struct {
 	Addresses   map[uint]string `json:"addresses"`
 	ContentHash string          `json:"contentHash"`
-	Text        string          `json:"text"`
+	TXT         string          `json:"TXT"`
 	A           string          `json:"A"`
 }
 

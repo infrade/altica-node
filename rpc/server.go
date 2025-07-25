@@ -87,7 +87,9 @@ func (s *RPCServer) methods() map[string]func(json.RawMessage) (interface{}, err
 		"domain.register": s.handleDomainRegister,
 		"domain.get":      s.handleDomainGet,
 		"domain.votes":    s.handleDomainVotes,
-		"record.add":      s.handleRecordAdd,
+
+		// Binding management
+		"binding.add": s.handleAddBinding,
 
 		// DHT operations
 		"dht.findPeer":      s.handleDHTFindPeer,

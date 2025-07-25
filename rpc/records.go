@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,31 +16,34 @@ import (
 	"github.com/libp2p/go-libp2p/core/routing"
 )
 
+type DomainParamBase struct {
+	Domain string `json:"domain"`
+}
+
+type DomainGetParams struct {
+	DomainParamBase
+}
+
 type DomainRegisterParams struct {
-	Domain    string        `json:"domain"`
+	DomainParamBase
 	TTL       time.Duration `json:"ttl"`
 	Signature string        `json:"signature"`
 	PublicKey string        `json:"public_key"`
 	SignedTx  string        `json:"signed_tx"`
 }
 
-type DomainGetParams struct {
-	Domain string `json:"domain"`
+type DomainVotesParams struct {
+	DomainParamBase
 }
 
 type DomainStatusParams struct {
-	Domain string `json:"domain"`
+	DomainParamBase
 }
 
 type RecordAddParams struct {
-	Domain  string                 `json:"domain"`
-	Chain   int                    `json:"chain"`
-	Address string                 `json:"address"`
-	Proof   map[string]interface{} `json:"proof"` // e.g., {"challenge":..., "signature":...}
-}
-
-type DomainVotesParams struct {
-	Domain string `json:"domain"`
+	DomainParamBase
+	Type  string `json:"type"`
+	Value string `json:"value"`
 }
 
 func (p *DomainRegisterParams) Validate() error {
@@ -148,54 +152,6 @@ func (s *RPCServer) handleDomainRegister(params json.RawMessage) (interface{}, e
 	return record, nil
 }
 
-// Mapping addition handler (wallet/address)
-// wallet add should be initiated from the blockchain for EVM, rewrite this later
-func (s *RPCServer) handleRecordAdd(params json.RawMessage) (interface{}, error) {
-	// var p RecordAddParams
-	// if err := json.Unmarshal(params, &p); err != nil {
-	// 	return nil, fmt.Errorf("invalid params: %w", err)
-	// }
-
-	// // Get the latest version of the record
-	// record, err := s.node.Store.GetLatestRecord(p.Domain)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("domain not found: %w", err)
-	// }
-
-	// // Validate proof for the chain
-	// if !validateProof(p.Chain, p.Address, p.Proof) {
-	// 	return nil, fmt.Errorf("invalid proof for address on chain %d", p.Chain)
-	// }
-
-	// // Update bindings and metadata
-	// record.Bindings.Addresses[p.Chain] = p.Address
-	// if record.Metadata == nil {
-	// 	record.Metadata = make(map[string]interface{})
-	// }
-	// if record.Metadata["proofs"] == nil {
-	// 	record.Metadata["proofs"] = map[string]interface{}{}
-	// }
-	// proofs := record.Metadata["proofs"].(map[int]interface{})
-	// proofs[p.Chain] = p.Proof
-	// record.Metadata["proofs"] = proofs
-	// record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
-
-	// // Save updated record
-	// if err := s.node.Store.Add(record); err != nil {
-	// 	return nil, fmt.Errorf("failed to update record: %w", err)
-	// }
-	// if err := s.node.PublishRecord(record); err != nil {
-	// 	return nil, fmt.Errorf("failed to publish update: %w", err)
-	// }
-	// return record, nil
-	return nil, fmt.Errorf("record add not implemented yet")
-}
-
-func validateProof(chain int, address string, proof map[string]interface{}) bool {
-	// TODO: Implement chain-specific proof validation
-	return true
-}
-
 func (s *RPCServer) handleDomainVotes(params json.RawMessage) (interface{}, error) {
 	var p DomainVotesParams
 	if err := json.Unmarshal(params, &p); err != nil {
@@ -216,4 +172,74 @@ func (s *RPCServer) handleDomainVotes(params json.RawMessage) (interface{}, erro
 	}
 
 	return result, nil
+}
+
+func (s *RPCServer) handleAddBinding(params json.RawMessage) (interface{}, error) {
+	var p RecordAddParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+
+	if p.Domain == "" {
+		return nil, fmt.Errorf("missing required field: domain")
+	}
+	if p.Type == "" || p.Value == "" {
+		return nil, fmt.Errorf("missing required field: type or value")
+	}
+
+	record, found := s.node.Store.Get(p.Domain)
+	if !found {
+		return nil, fmt.Errorf("domain not found")
+	}
+	if record.Status != "confirmed" {
+		return nil, fmt.Errorf("domain is not confirmed/active")
+	}
+
+	updated := false
+
+	switch strings.ToLower(p.Type) {
+	case "a":
+		if record.Bindings.A != p.Value {
+			record.Bindings.A = p.Value
+			updated = true
+		}
+	case "txt":
+		if record.Bindings.TXT != p.Value {
+			record.Bindings.TXT = p.Value
+			updated = true
+		}
+	case "contenthash":
+		if record.Bindings.ContentHash != p.Value {
+			record.Bindings.ContentHash = p.Value
+			updated = true
+		}
+	// TODO: EVM Addresses should be updated from the smart contract, listen to 'NameBound' event and update our record
+	case "address":
+		// For address, expect value to be chain_id:address (e.g., "1:0xabc...")
+		parts := strings.SplitN(p.Value, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("address binding value must be 'chain_id:address'")
+		}
+		chainID, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid chain_id: %w", err)
+		}
+		if record.Bindings.Addresses == nil {
+			record.Bindings.Addresses = make(map[uint]string)
+		}
+		if record.Bindings.Addresses[uint(chainID)] != parts[1] {
+			record.Bindings.Addresses[uint(chainID)] = parts[1]
+			updated = true
+		}
+	default:
+		return nil, fmt.Errorf("unsupported binding type: %s", p.Type)
+	}
+
+	if updated {
+		record.Metadata["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+		if err := s.node.Store.SaveRecord(*record); err != nil {
+			return nil, fmt.Errorf("failed to save updated record: %w", err)
+		}
+	}
+	return record, nil
 }

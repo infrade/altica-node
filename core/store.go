@@ -914,6 +914,7 @@ func (s *RecordStore) SaveRecord(record Record) error {
 		return fmt.Errorf("failed to store record: %w", err)
 	}
 
+	// TODO: this should be done only when registering
 	// Save namehash mapping
 	namehash := Namehash(record.Domain)
 	namehashKey := makeNamehashKey(namehash)
